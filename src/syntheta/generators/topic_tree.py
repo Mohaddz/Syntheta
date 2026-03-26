@@ -113,7 +113,7 @@ class TopicTreeGenerator(BaseGenerator):
             yield batch
 
     async def _build_tree(self) -> TopicNode:
-        """Build a hierarchical topic tree via LLM."""
+        """Build a hierarchical topic tree via LLM. Retries on malformed JSON."""
         template = load_prompt("generators.topic_tree", self.prompt_overrides)
         prompt = render_template(
             template,
@@ -122,18 +122,30 @@ class TopicTreeGenerator(BaseGenerator):
             breadth=self.topic_breadth,
         )
 
-        result = await self.llm.complete(
-            messages=[{"role": "user", "content": prompt}],
-            stage="topic_tree",
-        )
+        max_attempts = 3
+        last_error: Exception | None = None
 
-        try:
-            data = _parse_json(result["content"])
-            return _parse_tree(data)
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            raise MalformedResponseError(
-                f"Failed to parse topic tree from LLM response: {e}"
-            ) from e
+        for attempt in range(max_attempts):
+            result = await self.llm.complete(
+                messages=[{"role": "user", "content": prompt}],
+                stage="topic_tree",
+            )
+
+            try:
+                data = _parse_json(result["content"])
+                return _parse_tree(data)
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                last_error = e
+                logger.warning(
+                    "Topic tree parse failed (attempt %d/%d): %s",
+                    attempt + 1,
+                    max_attempts,
+                    e,
+                )
+
+        raise MalformedResponseError(
+            f"Failed to parse topic tree after {max_attempts} attempts: {last_error}"
+        )
 
     def _plan_distribution(self, topics: list[str], n: int) -> list[PlanEntry]:
         """Allocate n samples across topic × task_type × language × difficulty."""
@@ -193,23 +205,110 @@ class TopicTreeGenerator(BaseGenerator):
 
 
 def _parse_json(text: str) -> Any:
-    """Extract and parse JSON from LLM output, handling markdown code blocks."""
+    """Extract and parse JSON from LLM output.
+
+    Handles: markdown code blocks, truncated JSON, extra text around JSON.
+    """
     text = text.strip()
+
     # Remove markdown code blocks if present
     if text.startswith("```"):
         lines = text.split("\n")
-        # Remove first and last lines (```json and ```)
         lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines)
+        text = "\n".join(lines).strip()
+
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to extract JSON object or array from the text
+    for start_char, end_char in [("{", "}"), ("[", "]")]:
+        start = text.find(start_char)
+        if start == -1:
+            continue
+        # Find the last matching bracket
+        end = text.rfind(end_char)
+        if end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                pass
+
+    # Try to repair truncated JSON by closing open brackets
+    for start_char, _end_char in [("{", "}"), ("[", "]")]:
+        start = text.find(start_char)
+        if start != -1:
+            fragment = text[start:]
+            repaired = _repair_json(fragment)
+            if repaired is not None:
+                return repaired
+
+    # Give up -- raise the original error
     return json.loads(text)
 
 
-def _parse_tree(data: dict) -> TopicNode:
-    """Parse a JSON dict into a TopicNode tree."""
-    topics_data = data.get("topics", [])
+def _repair_json(text: str) -> Any | None:
+    """Try to repair truncated JSON by closing open brackets/braces."""
+    # Count open vs close brackets
+    opens = {"[": 0, "{": 0}
+    closes = {"]": "[", "}": "{"}
+
+    for char in text:
+        if char in opens:
+            opens[char] += 1
+        elif char in closes:
+            opens[closes[char]] = max(0, opens[closes[char]] - 1)
+
+    # Truncate at the last valid comma or complete value, then close brackets
+    # Try progressively shorter substrings
+    for trim in range(0, min(200, len(text)), 10):
+        candidate = text[: len(text) - trim] if trim else text
+        # Remove trailing partial content after last comma
+        last_comma = candidate.rfind(",")
+        if last_comma > 0 and trim > 0:
+            candidate = candidate[:last_comma]
+        # Close any open brackets
+        suffix = ""
+        for char in reversed(candidate):
+            if char == "{":
+                suffix += "}"
+            elif char == "[":
+                suffix += "]"
+            elif char == "}":
+                suffix = suffix[:-1] if suffix.endswith("}") else suffix
+            elif char == "]":
+                suffix = suffix[:-1] if suffix.endswith("]") else suffix
+
+        # Recount what's needed
+        o = {"[": 0, "{": 0}
+        for c in candidate:
+            if c in o:
+                o[c] += 1
+            elif c in closes:
+                o[closes[c]] = max(0, o[closes[c]] - 1)
+
+        suffix = "}" * o["{"] + "]" * o["["]
+
+        try:
+            return json.loads(candidate + suffix)
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
+def _parse_tree(data: dict | list) -> TopicNode:
+    """Parse a JSON dict or list into a TopicNode tree.
+
+    Handles both {"topics": [...]} and bare [...] (from truncated JSON repair).
+    """
+    topics_data = data if isinstance(data, list) else data.get("topics", [])
     root = TopicNode(name="root", subtopics=[])
     for t in topics_data:
-        root.subtopics.append(_parse_node(t))
+        if isinstance(t, dict):
+            root.subtopics.append(_parse_node(t))
     return root
 
 

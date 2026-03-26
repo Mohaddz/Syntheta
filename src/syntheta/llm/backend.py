@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 from typing import Any
 
 import openai
@@ -20,13 +21,22 @@ from syntheta.llm.rate_limiter import AdaptiveRateLimiter
 
 logger = logging.getLogger("syntheta.llm")
 
+# Callback: (call_id, stage, token_text) -> None
+# call_id is unique per LLM call so the display can track multiple concurrent streams
+OnTokenCallback = Callable[[str, str, str], None]
+
 
 class OpenAICompatibleLLM:
     """Unified LLM backend for all Syntheta operations.
 
     Wraps AsyncOpenAI with max_retries=0 so we control retry/concurrency ourselves.
     Supports three model roles: model, response_model, embedding_model.
+
+    When on_token is set, completions use streaming mode and fire the callback
+    for each token as it arrives, enabling real-time display of generation.
     """
+
+    _call_counter: int = 0
 
     def __init__(
         self,
@@ -68,6 +78,9 @@ class OpenAICompatibleLLM:
         )
         self.cost_tracker = CostTracker(pricing_override=pricing)
 
+        # Optional callback for real-time token streaming to display
+        self.on_token: OnTokenCallback | None = None
+
     def _resolve_model(self, model_role: str) -> str:
         """Resolve which model to use based on role. response_model falls back to model."""
         if model_role == "response_model":
@@ -78,6 +91,10 @@ class OpenAICompatibleLLM:
             raise LLMError("No embedding_model configured. Set llm.embedding_model in config.")
         return self.model
 
+    def _next_call_id(self) -> str:
+        OpenAICompatibleLLM._call_counter += 1
+        return f"call_{OpenAICompatibleLLM._call_counter}"
+
     async def complete(
         self,
         messages: list[dict[str, str]],
@@ -87,48 +104,31 @@ class OpenAICompatibleLLM:
     ) -> dict[str, Any]:
         """Send a chat completion request with retry and rate limiting.
 
-        Args:
-            messages: List of message dicts (role, content).
-            model_role: Which model role to use (model, response_model).
-            stage: Pipeline stage name for cost tracking.
-            **kwargs: Extra args passed to chat.completions.create.
+        When on_token is set, uses streaming mode and fires the callback
+        for each token chunk as it arrives from the API.
 
         Returns:
             Dict with 'content', 'usage', 'model' keys.
         """
         model = self._resolve_model(model_role)
+        use_streaming = self.on_token is not None
         last_error: Exception | None = None
 
         for attempt in range(self.max_retries + 1):
             await self.rate_limiter.acquire()
             try:
-                response = await self._client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    **kwargs,
-                )
-                self.rate_limiter.release()
-                self.rate_limiter.on_success()
-
-                # Track usage
-                if response.usage:
-                    self.cost_tracker.add_usage(
-                        stage,
-                        response.usage.prompt_tokens,
-                        response.usage.completion_tokens,
+                if use_streaming:
+                    result = await self._complete_streaming(
+                        model, messages, stage, **kwargs
+                    )
+                else:
+                    result = await self._complete_standard(
+                        model, messages, stage, **kwargs
                     )
 
-                content = response.choices[0].message.content if response.choices else None
-                return {
-                    "content": content or "",
-                    "usage": {
-                        "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                        "completion_tokens": (
-                            response.usage.completion_tokens if response.usage else 0
-                        ),
-                    },
-                    "model": response.model,
-                }
+                self.rate_limiter.release()
+                self.rate_limiter.on_success()
+                return result
 
             except openai.AuthenticationError as e:
                 self.rate_limiter.release()
@@ -170,7 +170,98 @@ class OpenAICompatibleLLM:
                     )
                     await asyncio.sleep(backoff)
 
-        raise LLMError(f"All {self.max_retries + 1} attempts failed: {last_error}") from last_error
+        raise LLMError(
+            f"All {self.max_retries + 1} attempts failed: {last_error}"
+        ) from last_error
+
+    async def _complete_standard(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        stage: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Non-streaming completion."""
+        response = await self._client.chat.completions.create(
+            model=model,
+            messages=messages,
+            **kwargs,
+        )
+
+        if response.usage:
+            self.cost_tracker.add_usage(
+                stage,
+                response.usage.prompt_tokens,
+                response.usage.completion_tokens,
+            )
+
+        content = response.choices[0].message.content if response.choices else None
+        return {
+            "content": content or "",
+            "usage": {
+                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+                "completion_tokens": (
+                    response.usage.completion_tokens if response.usage else 0
+                ),
+            },
+            "model": response.model,
+        }
+
+    async def _complete_streaming(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        stage: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Streaming completion -- fires on_token callback for each chunk."""
+        call_id = self._next_call_id()
+        accumulated = []
+        response_model_name = model
+        prompt_tokens = 0
+        completion_tokens = 0
+
+        stream = await self._client.chat.completions.create(
+            model=model,
+            messages=messages,
+            stream=True,
+            stream_options={"include_usage": True},
+            **kwargs,
+        )
+
+        async for chunk in stream:
+            # Extract token content
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    accumulated.append(delta.content)
+                    # Fire callback with accumulated text so far
+                    if self.on_token:
+                        self.on_token(call_id, stage, "".join(accumulated))
+
+            # Extract model name from first chunk
+            if chunk.model:
+                response_model_name = chunk.model
+
+            # Extract usage from final chunk (stream_options=include_usage)
+            if chunk.usage:
+                prompt_tokens = chunk.usage.prompt_tokens
+                completion_tokens = chunk.usage.completion_tokens
+
+        content = "".join(accumulated)
+
+        # Track usage
+        if prompt_tokens or completion_tokens:
+            self.cost_tracker.add_usage(stage, prompt_tokens, completion_tokens)
+
+        return {
+            "content": content,
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
+            "model": response_model_name,
+        }
 
     async def complete_batch(
         self,
@@ -179,16 +270,7 @@ class OpenAICompatibleLLM:
         stage: str = "unknown",
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
-        """Send multiple chat completions concurrently with rate limiting.
-
-        Args:
-            message_batches: List of message lists, one per call.
-            model_role: Which model role to use.
-            stage: Pipeline stage name for cost tracking.
-
-        Returns:
-            List of result dicts (same order as input).
-        """
+        """Send multiple chat completions concurrently with rate limiting."""
         tasks = [
             self.complete(messages, model_role=model_role, stage=stage, **kwargs)
             for messages in message_batches
@@ -200,15 +282,7 @@ class OpenAICompatibleLLM:
         texts: list[str],
         stage: str = "unknown",
     ) -> list[list[float]]:
-        """Get embeddings for a list of texts.
-
-        Args:
-            texts: List of strings to embed.
-            stage: Pipeline stage name for cost tracking.
-
-        Returns:
-            List of embedding vectors.
-        """
+        """Get embeddings for a list of texts."""
         model = self._resolve_model("embedding_model")
         await self.rate_limiter.acquire()
         try:
