@@ -1,0 +1,13 @@
+Rewrite the following text as a step-by-step tutorial.
+
+Requirements:
+- Break the content into clear, numbered steps
+- Each step should be actionable and specific
+- Include any prerequisites or important notes
+- Add a brief introduction and conclusion
+- Maintain factual accuracy
+
+Original text:
+{{text}}
+
+Output the rewritten text as a tutorial (no JSON):

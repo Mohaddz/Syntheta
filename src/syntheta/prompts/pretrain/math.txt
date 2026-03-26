@@ -1,0 +1,12 @@
+Rewrite the following text as a math word problem with a detailed solution.
+
+Requirements:
+- Create a realistic word problem that incorporates the concepts from the text
+- Include numerical values and require mathematical reasoning
+- Provide a step-by-step solution
+- The problem should test understanding of the underlying concepts
+
+Original text:
+{{text}}
+
+Output the rewritten text as a math word problem followed by its solution (no JSON):

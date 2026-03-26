@@ -1,0 +1,11 @@
+Given the domain "{{domain}}", generate a hierarchical topic tree.
+
+Requirements:
+- Generate exactly {{breadth}} top-level topics
+- Each topic should have {{breadth}} subtopics
+- Go {{depth}} levels deep
+- Topics should be diverse and cover different aspects of the domain
+- Each topic should be specific enough to generate focused questions about it
+
+Output ONLY a valid JSON object with this structure (no markdown, no explanation):
+{"topics": [{"name": "topic name", "description": "one sentence description", "subtopics": [{"name": "subtopic name", "description": "one sentence description", "subtopics": []}]}]}

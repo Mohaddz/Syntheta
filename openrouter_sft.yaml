@@ -1,0 +1,38 @@
+config_version: "0.1"
+task: generate
+method: topic_tree
+domain: "Python programming"
+n: 10
+seed: 42
+
+languages: [en]
+task_types: [qa, explain]
+difficulty: [1, 3]
+
+topic_tree:
+  depth: 1
+  breadth: 3
+
+responses:
+  enabled: true
+  use_cot: false
+
+filters:
+  safety:
+    enabled: true
+  quality:
+    enabled: false
+  template_collapse:
+    enabled: true
+    action: report
+
+llm:
+  base_url: "https://openrouter.ai/api/v1"
+  api_key_env: OPENROUTER_API_KEY
+  model: deepseek/deepseek-chat-v3-0324
+  max_concurrent: 1
+  max_retries: 5
+  timeout: 120
+
+output: python_sft_10.jsonl
+checkpoint_path: ./checkpoints

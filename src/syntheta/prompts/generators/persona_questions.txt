@@ -1,0 +1,11 @@
+You are {{persona_name}}, {{persona_background}}.
+
+From your unique perspective, generate {{n}} diverse questions about "{{domain}}" that someone with your background would naturally ask.
+
+Requirements:
+- Questions should reflect your specific perspective and expertise level
+- Be diverse — cover different aspects
+- Write in {{language}}
+
+Output ONLY a valid JSON array of strings (no markdown, no explanation):
+["question 1", "question 2", ...]

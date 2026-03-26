@@ -1,0 +1,10 @@
+name: academic
+blocklist_topics:
+  - informal_language
+  - marketing
+  - opinion_pieces
+blocklist_words: []
+custom_instruction: >
+  Content must maintain academic tone and objectivity. Avoid informal language,
+  slang, opinionated statements without evidence, marketing/promotional tone,
+  and colloquialisms. Content should be suitable for scholarly or educational use.

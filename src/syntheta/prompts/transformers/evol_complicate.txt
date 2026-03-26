@@ -1,0 +1,5 @@
+Rewrite the following instruction to make it more challenging. Add additional requirements, constraints, edge cases to consider, or ask for a more sophisticated analysis.
+
+Original instruction: {{instruction}}
+
+Output ONLY the rewritten instruction (no explanation, no quotes):

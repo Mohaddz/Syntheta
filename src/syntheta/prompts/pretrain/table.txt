@@ -1,0 +1,12 @@
+Rewrite the following text as a structured table with a QA pair.
+
+Requirements:
+- Extract key data points and organize them in a markdown table
+- Include relevant columns (e.g., category, value, description)
+- Add a question and answer that can be answered from the table
+- Maintain factual accuracy
+
+Original text:
+{{text}}
+
+Output a markdown table followed by a question and answer about the data (no JSON):

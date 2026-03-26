@@ -1,0 +1,25 @@
+config_version: "0.1"
+task: generate
+method: topic_tree
+n: 1000
+
+topic_tree:
+  depth: 2
+  breadth: 5
+
+evolve:
+  enabled: false
+
+responses:
+  enabled: true
+  use_cot: false
+
+filters:
+  safety:
+    enabled: true
+  quality:
+    enabled: true
+    min_score: 0.7
+  template_collapse:
+    enabled: true
+    action: report

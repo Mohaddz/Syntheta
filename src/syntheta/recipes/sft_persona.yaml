@@ -1,0 +1,15 @@
+config_version: "0.1"
+task: generate
+method: persona
+n: 1000
+
+responses:
+  enabled: true
+  use_cot: false
+
+filters:
+  safety:
+    enabled: true
+  quality:
+    enabled: true
+    min_score: 0.7

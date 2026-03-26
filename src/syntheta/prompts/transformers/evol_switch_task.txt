@@ -1,0 +1,5 @@
+Transform the following instruction into a different task type while keeping the same topic. For example, turn a question into an explanation request, a comparison into a classification task, etc.
+
+Original instruction: {{instruction}}
+
+Output ONLY the transformed instruction (no explanation, no quotes):

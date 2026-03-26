@@ -1,0 +1,5 @@
+Rewrite the following instruction to make it more concrete and specific. Replace abstract concepts with specific examples, add real-world context, or request specific details.
+
+Original instruction: {{instruction}}
+
+Output ONLY the rewritten instruction (no explanation, no quotes):

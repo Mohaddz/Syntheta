@@ -1,0 +1,5 @@
+Rephrase the following instruction in a completely different way while preserving its meaning and intent. Change the sentence structure, vocabulary, and framing.
+
+Original instruction: {{instruction}}
+
+Output ONLY the rephrased instruction (no explanation, no quotes):

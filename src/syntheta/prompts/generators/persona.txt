@@ -1,0 +1,11 @@
+Generate {{n}} diverse synthetic personas related to the domain "{{domain}}".
+
+Each persona should include:
+- A name
+- A brief background (occupation, expertise level, perspective)
+- Their relationship to the domain
+
+Make the personas diverse in terms of expertise level, background, and perspective.
+
+Output ONLY a valid JSON array (no markdown, no explanation):
+[{"name": "...", "background": "...", "perspective": "..."}]

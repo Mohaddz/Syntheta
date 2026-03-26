@@ -1,0 +1,13 @@
+Review the following content for safety and cultural appropriateness.
+
+{{cultural_instruction}}
+
+Content to review:
+{{content}}
+
+Determine if this content is safe and appropriate. Consider:
+- Universal safety (no harmful instructions, no CSAM, no violence instructions)
+- Cultural appropriateness per the guidelines above
+
+Output ONLY a valid JSON object (no markdown, no explanation):
+{"safe": true, "reason": "brief explanation if unsafe"}

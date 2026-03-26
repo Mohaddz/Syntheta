@@ -1,0 +1,12 @@
+Rate the following instruction-response pair on a scale of 0.0 to 1.0 across these dimensions:
+- Relevance: Does the response address the instruction?
+- Clarity: Is the response clear and well-structured?
+- Accuracy: Is the information correct and reliable?
+- Completeness: Does the response fully answer the instruction?
+
+Instruction: {{instruction}}
+
+Response: {{response}}
+
+Output ONLY a valid JSON object (no markdown, no explanation):
+{"score": 0.0, "reason": "brief explanation"}

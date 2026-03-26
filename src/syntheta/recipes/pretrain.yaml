@@ -1,0 +1,17 @@
+config_version: "0.1"
+task: generate
+method: pretrain_rewriter
+n: 1000
+
+responses:
+  enabled: false
+
+filters:
+  safety:
+    enabled: true
+  quality:
+    enabled: false
+  template_collapse:
+    enabled: true
+    action: remove
+    max_repeat: 3

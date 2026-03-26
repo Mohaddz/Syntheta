@@ -1,0 +1,19 @@
+name: family_friendly
+blocklist_topics:
+  - adult_content
+  - violence
+  - substance_use
+  - profanity
+blocklist_words:
+  - damn
+  - hell
+  - shit
+  - fuck
+  - ass
+  - drug
+  - cocaine
+  - heroin
+custom_instruction: >
+  Content must be appropriate for all ages, including children.
+  Avoid adult content, graphic violence, profanity, substance use references,
+  and any content that would not be suitable for a family audience.

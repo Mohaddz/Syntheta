@@ -1,0 +1,62 @@
+"""Default configuration values."""
+
+DEFAULTS = {
+    "config_version": "0.1",
+    "task": "generate",
+    "seed": None,
+    "domain": "general",
+    "n": 100,
+    "method": "topic_tree",
+    "languages": ["en"],
+    "task_types": ["qa", "explain", "compare", "creative"],
+    "difficulty": [1, 5],
+    "batch_size": 100,
+    "over_generate_factor": 1.2,
+    "topic_tree": {
+        "depth": 2,
+        "breadth": 5,
+    },
+    "evolve": {
+        "enabled": False,
+        "rounds": 1,
+        "strategies": ["deepen", "concretize", "complicate"],
+    },
+    "responses": {
+        "enabled": True,
+        "use_cot": False,
+    },
+    "filters": {
+        "safety": {
+            "enabled": True,
+            "cultural_context": None,
+            "blocklist_topics": [],
+            "blocklist_words": [],
+            "custom_instruction": None,
+        },
+        "quality": {
+            "enabled": False,
+            "min_score": 0.7,
+        },
+        "template_collapse": {
+            "enabled": False,
+            "prefix_length": 50,
+            "max_repeat": 3,
+            "action": "report",
+        },
+    },
+    "llm": {
+        "base_url": None,
+        "api_key_env": "OPENAI_API_KEY",
+        "model": "gpt-4o-mini",
+        "response_model": None,
+        "embedding_model": None,
+        "max_concurrent": 10,
+        "max_retries": 3,
+        "timeout": 60,
+        "pricing": None,
+    },
+    "output": "output.jsonl",
+    "checkpoint_path": "./checkpoints",
+    "log_prompts": False,
+    "prompts": {},
+}

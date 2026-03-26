@@ -1,0 +1,23 @@
+name: islamic
+blocklist_topics:
+  - alcohol
+  - gambling
+  - adult_entertainment
+  - pork
+  - interest_based_finance
+blocklist_words:
+  - beer
+  - wine
+  - vodka
+  - whiskey
+  - casino
+  - gambling
+  - poker
+  - slot_machine
+  - strip_club
+  - pornography
+custom_instruction: >
+  Content must respect Islamic values. Avoid references to alcohol consumption,
+  gambling, adult entertainment, pork products, or content that contradicts
+  Islamic principles. Financial content should not promote interest-based
+  lending (riba). Content should be appropriate for a Muslim audience.

@@ -1,0 +1,5 @@
+Rewrite the following instruction to broaden its scope. Make it cover a wider range of topics, require comparisons, or ask for a more comprehensive perspective.
+
+Original instruction: {{instruction}}
+
+Output ONLY the rewritten instruction (no explanation, no quotes):

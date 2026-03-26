@@ -1,0 +1,5 @@
+Rewrite the following instruction to increase its depth and complexity. Add constraints, require more detailed analysis, or ask for deeper reasoning.
+
+Original instruction: {{instruction}}
+
+Output ONLY the rewritten instruction (no explanation, no quotes):

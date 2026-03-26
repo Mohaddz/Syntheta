@@ -1,0 +1,19 @@
+You are generating diverse, high-quality instructions for training data.
+
+Domain: {{domain}}
+Topic: {{topic}}
+Task type: {{task_type}}
+Difficulty level: {{difficulty}} (1=basic, 5=expert)
+Language: {{language}}
+
+Generate {{n}} unique {{task_type}} instructions about "{{topic}}" at difficulty level {{difficulty}}.
+
+Requirements:
+- Each instruction should be self-contained and clear
+- Instructions should be diverse — do not repeat the same question pattern
+- Match the specified difficulty level
+- Write in {{language}}
+- Focus specifically on the topic "{{topic}}" within the domain "{{domain}}"
+
+Output ONLY a valid JSON array of strings (no markdown, no explanation):
+["instruction 1", "instruction 2", ...]

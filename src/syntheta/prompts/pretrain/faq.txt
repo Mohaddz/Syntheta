@@ -1,0 +1,13 @@
+Rewrite the following text as a comprehensive FAQ (Frequently Asked Questions) document.
+
+Requirements:
+- Extract the key information from the text
+- Create 3-5 question-answer pairs
+- Questions should cover the most important points
+- Answers should be complete and self-contained
+- Maintain the factual accuracy of the original text
+
+Original text:
+{{text}}
+
+Output the rewritten text as a FAQ document (no JSON, just the FAQ):

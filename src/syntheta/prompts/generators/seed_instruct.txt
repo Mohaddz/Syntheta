@@ -1,0 +1,14 @@
+Here are some example instructions for reference:
+
+{{examples}}
+
+Based on these examples, generate {{n}} NEW and DIFFERENT instructions.
+
+Requirements:
+- Each instruction must be substantially different from the examples
+- Maintain similar style and complexity to the examples
+- Cover different topics and angles
+- Do not simply rephrase the examples
+
+Output ONLY a valid JSON array of strings (no markdown, no explanation):
+["new instruction 1", "new instruction 2", ...]
