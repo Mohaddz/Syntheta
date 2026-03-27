@@ -8,6 +8,7 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 import openai
 from openai import AsyncOpenAI
 
@@ -51,6 +52,7 @@ class OpenAICompatibleLLM:
         timeout: float = 60.0,
         max_backoff: float = 300.0,
         pricing: dict[str, float] | None = None,
+        disable_thinking: bool = False,
     ) -> None:
         # Resolve API key
         resolved_key = api_key or os.environ.get(api_key_env)
@@ -64,6 +66,7 @@ class OpenAICompatibleLLM:
         self.response_model = response_model
         self.embedding_model = embedding_model
         self.max_retries = max_retries
+        self.disable_thinking = disable_thinking
 
         self._client = AsyncOpenAI(
             api_key=resolved_key,
@@ -80,6 +83,12 @@ class OpenAICompatibleLLM:
 
         # Optional callback for real-time token streaming to display
         self.on_token: OnTokenCallback | None = None
+
+        # Live stats for verbose display
+        self.active_calls = 0
+        self.total_calls = 0
+        self.total_retries = 0
+        self.total_errors = 0
 
     def _resolve_model(self, model_role: str) -> str:
         """Resolve which model to use based on role. response_model falls back to model."""
@@ -114,8 +123,17 @@ class OpenAICompatibleLLM:
         use_streaming = self.on_token is not None
         last_error: Exception | None = None
 
+        # Inject disable_thinking via extra_body if configured
+        if self.disable_thinking:
+            extra = kwargs.pop("extra_body", {}) or {}
+            extra.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
+            kwargs["extra_body"] = extra
+
+        self.total_calls += 1
+
         for attempt in range(self.max_retries + 1):
             await self.rate_limiter.acquire()
+            self.active_calls += 1
             try:
                 if use_streaming:
                     result = await self._complete_streaming(
@@ -127,21 +145,28 @@ class OpenAICompatibleLLM:
                     )
 
                 self.rate_limiter.release()
+                self.active_calls -= 1
                 self.rate_limiter.on_success()
                 return result
 
             except openai.AuthenticationError as e:
                 self.rate_limiter.release()
+                self.active_calls -= 1
+                self.total_errors += 1
                 raise AuthenticationError(f"Authentication failed: {e}") from e
 
             except openai.NotFoundError as e:
                 self.rate_limiter.release()
+                self.active_calls -= 1
+                self.total_errors += 1
                 raise ModelNotFoundError(
                     f"Model '{model}' not found. Check llm.model in config: {e}"
                 ) from e
 
             except openai.RateLimitError as e:
                 self.rate_limiter.release()
+                self.active_calls -= 1
+                self.total_retries += 1
                 retry_after = _extract_retry_after(e)
                 logger.warning(
                     "Rate limited (attempt %d/%d). Retry-after: %s",
@@ -156,8 +181,11 @@ class OpenAICompatibleLLM:
                 openai.APIConnectionError,
                 openai.APITimeoutError,
                 openai.InternalServerError,
+                openai.APIError,
             ) as e:
                 self.rate_limiter.release()
+                self.active_calls -= 1
+                self.total_retries += 1
                 last_error = e
                 if attempt < self.max_retries:
                     backoff = min(2**attempt, 30.0)
@@ -170,6 +198,7 @@ class OpenAICompatibleLLM:
                     )
                     await asyncio.sleep(backoff)
 
+        self.total_errors += 1
         raise LLMError(
             f"All {self.max_retries + 1} attempts failed: {last_error}"
         ) from last_error
@@ -195,9 +224,9 @@ class OpenAICompatibleLLM:
                 response.usage.completion_tokens,
             )
 
-        content = response.choices[0].message.content if response.choices else None
+        content = _extract_content(response)
         return {
-            "content": content or "",
+            "content": content,
             "usage": {
                 "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
                 "completion_tokens": (
@@ -229,24 +258,30 @@ class OpenAICompatibleLLM:
             **kwargs,
         )
 
-        async for chunk in stream:
-            # Extract token content
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if delta and delta.content:
-                    accumulated.append(delta.content)
-                    # Fire callback with accumulated text so far
-                    if self.on_token:
-                        self.on_token(call_id, stage, "".join(accumulated))
+        try:
+            async for chunk in stream:
+                # Extract token content (check content first, fallback to reasoning)
+                if chunk.choices:
+                    delta = chunk.choices[0].delta
+                    if delta:
+                        token = delta.content or getattr(delta, "reasoning", None) or ""
+                        if token:
+                            accumulated.append(token)
+                            if self.on_token:
+                                self.on_token(call_id, stage, "".join(accumulated))
 
-            # Extract model name from first chunk
-            if chunk.model:
-                response_model_name = chunk.model
+                # Extract model name from first chunk
+                if chunk.model:
+                    response_model_name = chunk.model
 
-            # Extract usage from final chunk (stream_options=include_usage)
-            if chunk.usage:
-                prompt_tokens = chunk.usage.prompt_tokens
-                completion_tokens = chunk.usage.completion_tokens
+                # Extract usage from final chunk (stream_options=include_usage)
+                if chunk.usage:
+                    prompt_tokens = chunk.usage.prompt_tokens
+                    completion_tokens = chunk.usage.completion_tokens
+        except (httpx.ReadError, httpx.RemoteProtocolError, httpx.ReadTimeout) as e:
+            # Network died mid-stream. Re-raise as APIConnectionError so the
+            # retry loop in complete() catches it and retries the full call.
+            raise openai.APIConnectionError(request=None) from e
 
         content = "".join(accumulated)
 
@@ -311,6 +346,40 @@ class OpenAICompatibleLLM:
     async def close(self) -> None:
         """Close the underlying HTTP client."""
         await self._client.close()
+
+
+def _extract_content(response: Any) -> str:
+    """Extract text content from a completion response.
+
+    Checks content first, falls back to reasoning field (for thinking models
+    served by vLLM where content is None and output is in reasoning).
+    """
+    if not response.choices:
+        return ""
+
+    msg = response.choices[0].message
+    content = msg.content
+    if content:
+        return content
+
+    # Fallback: check reasoning field (vLLM thinking models)
+    reasoning = getattr(msg, "reasoning", None)
+    if reasoning is None:
+        # Also check model_dump for fields not in the SDK type
+        try:
+            msg_dict = msg.model_dump()
+            reasoning = msg_dict.get("reasoning")
+        except Exception:
+            pass
+
+    if reasoning:
+        logger.warning(
+            "Model returned thinking output only (content=None, reasoning present). "
+            "Consider setting llm.disable_thinking=true or disabling thinking on your server."
+        )
+        return str(reasoning)
+
+    return ""
 
 
 def _extract_retry_after(error: openai.RateLimitError) -> float | None:

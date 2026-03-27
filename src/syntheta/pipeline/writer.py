@@ -2,53 +2,47 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from pathlib import Path
 
 from syntheta.schema.sample import Sample
-from syntheta.utils.jsonl import write_jsonl
 
 logger = logging.getLogger("syntheta.pipeline")
 
 
 class JSONLWriter:
-    """Writes samples to JSONL files in batches, then consolidates."""
+    """Append-mode writer that writes individual samples to a JSONL file.
 
-    def __init__(self, checkpoint_path: Path) -> None:
-        self.checkpoint_path = Path(checkpoint_path)
-        self.checkpoint_path.mkdir(parents=True, exist_ok=True)
+    Thread-safe via asyncio.Lock -- multiple concurrent tasks can write
+    without corrupting the file.
 
-    def write_batch(self, samples: list[Sample], batch_num: int) -> Path:
-        """Write a batch of samples to a numbered JSONL file.
+    Supports resume: if resume=True, counts existing lines and appends
+    instead of truncating.
+    """
 
-        Returns the path to the batch file.
-        """
-        batch_file = self.checkpoint_path / f"batch_{batch_num:04d}.jsonl"
-        records = [s.model_dump(mode="json") for s in samples]
-        write_jsonl(batch_file, records, mode="w")
-        logger.debug("Wrote %d samples to %s", len(samples), batch_file)
-        return batch_file
+    def __init__(self, output_path: Path, resume: bool = False) -> None:
+        self.output_path = Path(output_path)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = asyncio.Lock()
 
-    def consolidate(self, output_path: str | Path) -> int:
-        """Concatenate all batch files into the final output file.
+        if resume and self.output_path.exists():
+            # Count existing lines for resume
+            self._count = sum(1 for line in self.output_path.open() if line.strip())
+        else:
+            # Fresh start -- truncate
+            self.output_path.write_text("", encoding="utf-8")
+            self._count = 0
 
-        Returns the total number of records written.
-        """
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+    async def write_sample(self, sample: Sample) -> None:
+        """Write a single sample to the output file. Safe for concurrent calls."""
+        line = json.dumps(sample.model_dump(mode="json"), ensure_ascii=False)
+        async with self._lock:
+            with self.output_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+            self._count += 1
 
-        batch_files = sorted(self.checkpoint_path.glob("batch_*.jsonl"))
-        total = 0
-        with output_path.open("w", encoding="utf-8") as out:
-            for batch_file in batch_files:
-                with batch_file.open("r", encoding="utf-8") as bf:
-                    for line in bf:
-                        line = line.strip()
-                        if line:
-                            out.write(line + "\n")
-                            total += 1
-
-        logger.info(
-            "Consolidated %d samples from %d batches to %s", total, len(batch_files), output_path
-        )
-        return total
+    @property
+    def count(self) -> int:
+        return self._count

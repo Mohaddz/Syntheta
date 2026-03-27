@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -32,7 +33,7 @@ class QualityFilter(BaseFilter):
         self.prompt_overrides = prompt_overrides
 
     async def filter(self, samples: list[Sample]) -> list[Sample]:
-        """Score each sample and keep those above min_score."""
+        """Score all samples in parallel and keep those above min_score."""
         if not samples or not self.llm:
             return samples
 
@@ -43,41 +44,49 @@ class QualityFilter(BaseFilter):
         if not scoreable:
             return samples
 
-        template = load_prompt("filters.quality_judge", self.prompt_overrides)
+        # Score all in parallel (semaphore controls concurrency)
+        tasks = [self._score_one(sample) for sample in scoreable]
+        await asyncio.gather(*tasks)
 
-        passed = list(non_scoreable)  # Non-scoreable pass through
+        # Apply threshold
+        passed = list(non_scoreable)
         for sample in scoreable:
-            prompt = render_template(
-                template,
-                instruction=sample.instruction,
-                response=sample.response,
-            )
-
-            try:
-                result = await self.llm.complete(
-                    messages=[{"role": "user", "content": prompt}],
-                    stage="quality_filter",
-                )
-                score, reason = _parse_quality_response(result["content"])
-                sample.quality_score = score
-                sample.quality_reason = reason
-
-                if score >= self.min_score:
-                    passed.append(sample)
-                else:
-                    logger.debug(
-                        "Sample %s rejected: score=%.2f (min=%.2f), reason=%s",
-                        sample.id,
-                        score,
-                        self.min_score,
-                        reason,
-                    )
-            except Exception as e:
-                logger.warning("Quality scoring failed for sample %s: %s", sample.id, e)
-                # On error, pass the sample through
+            if sample.quality_score is not None and sample.quality_score >= self.min_score:
                 passed.append(sample)
+            elif sample.quality_score is None:
+                # Scoring failed, pass through
+                passed.append(sample)
+            else:
+                logger.debug(
+                    "Sample %s rejected: score=%.2f (min=%.2f), reason=%s",
+                    sample.id,
+                    sample.quality_score,
+                    self.min_score,
+                    sample.quality_reason,
+                )
 
         return passed
+
+    async def _score_one(self, sample: Sample) -> None:
+        """Score a single sample. Sets quality_score and quality_reason on the sample."""
+        template = load_prompt("filters.quality_judge", self.prompt_overrides)
+        prompt = render_template(
+            template,
+            instruction=sample.instruction,
+            response=sample.response,
+        )
+
+        try:
+            result = await self.llm.complete(
+                messages=[{"role": "user", "content": prompt}],
+                stage="quality_filter",
+            )
+            score, reason = _parse_quality_response(result["content"])
+            sample.quality_score = score
+            sample.quality_reason = reason
+        except Exception as e:
+            logger.warning("Quality scoring failed for sample %s: %s", sample.id, e)
+            # On error, leave quality_score as None (will pass through)
 
 
 def _parse_quality_response(response_text: str) -> tuple[float, str]:

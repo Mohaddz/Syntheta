@@ -11,7 +11,7 @@ DEFAULTS = {
     "task_types": ["qa", "explain", "compare", "creative"],
     "difficulty": [1, 5],
     "batch_size": 100,
-    "over_generate_factor": 1.2,
+    "over_generate_factor": 1.0,
     "topic_tree": {
         "depth": 2,
         "breadth": 5,
@@ -24,7 +24,9 @@ DEFAULTS = {
     "responses": {
         "enabled": True,
         "use_cot": False,
+        "max_tokens": None,
     },
+    "max_instruction_tokens": None,
     "filters": {
         "safety": {
             "enabled": True,
@@ -54,6 +56,7 @@ DEFAULTS = {
         "max_retries": 3,
         "timeout": 60,
         "pricing": None,
+        "disable_thinking": False,
     },
     "output": "output.jsonl",
     "checkpoint_path": "./checkpoints",

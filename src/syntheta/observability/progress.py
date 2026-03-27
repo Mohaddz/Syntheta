@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict, deque
+from collections.abc import Callable
 from typing import Any
 
 from rich.console import Console, Group
@@ -23,28 +24,46 @@ _STAGE_LABELS = {
     "pretrain_rewriter": "rewriting",
 }
 
+# Callback type for pulling live stats from the LLM backend
+StatsProvider = Callable[[], dict[str, Any]]
+
 
 class ProgressDisplay:
-    """Live CLI display showing a progress bar and per-sample streaming text.
+    """Live CLI display showing a progress bar, optional stats bar,
+    and per-sample streaming text.
 
-    Layout:
+    Normal mode:
         Generating ==================== 7/10 samples  00:32
-        [streaming] generating    What is the role of cata...
-        [streaming] responding    Catalysts are substances...
-        [done]      sample #7    What is the role of catalysts in...
-        [done]      sample #6    Explain the difference between...
+         ~  responding    The role of catalysts in...
+         +  sample #7     What is the role of catalysts in...
+
+    Verbose mode:
+        Generating ==================== 7/10 samples  00:32
+        [active: 8/10] [calls: 42] [retries: 2] [rejected: 3] [tokens: 12,340]
+         ~  responding    The role of catalysts in...
+         +  sample #7     What is the role of catalysts in...
     """
 
     MAX_VISIBLE_ROWS = 15
     MAX_TEXT_WIDTH = 90
 
-    def __init__(self, target_n: int, console: Console | None = None) -> None:
+    def __init__(
+        self,
+        target_n: int,
+        max_streams: int = 10,
+        verbose: bool = True,
+        console: Console | None = None,
+    ) -> None:
         self._console = console or Console()
         self._target_n = target_n
+        self._max_streams = max_streams
+        self._verbose = verbose
         self._completed_rows: deque[dict[str, Any]] = deque(maxlen=self.MAX_VISIBLE_ROWS)
         self._live: Live | None = None
+        self._stats_provider: StatsProvider | None = None
+        self._rejected_count = 0
 
-        # Streaming rows: call_id -> {stage, text} (ordered so newest shows last)
+        # Streaming rows: call_id -> {stage, text}
         self._streams: OrderedDict[str, dict[str, str]] = OrderedDict()
 
         # Main progress bar
@@ -57,6 +76,10 @@ class ProgressDisplay:
             console=self._console,
         )
         self._task_id = self._progress.add_task("Generating", total=target_n)
+
+    def set_stats_provider(self, provider: StatsProvider) -> None:
+        """Set a callable that returns live stats dict from the LLM backend."""
+        self._stats_provider = provider
 
     def start(self) -> None:
         """Start the live display."""
@@ -79,13 +102,21 @@ class ProgressDisplay:
         self._progress.update(self._task_id, completed=min(completed, self._target_n))
         self._refresh()
 
+    # Stages worth showing streaming output for (user-facing content)
+    _VISIBLE_STAGES: frozenset = frozenset({
+        "topic_tree", "persona_generation", "seed_dataset",
+        "response_generator", "evol_instruct", "pretrain_rewriter",
+    })
+
     def on_token(self, call_id: str, stage: str, accumulated_text: str) -> None:
-        """Called for each token chunk from the LLM. Updates the streaming row
-        for this call_id with the text accumulated so far."""
+        """Called for each token chunk from the LLM.
+        Only shows streaming rows for content-producing stages (generating,
+        responding, evolving). Internal stages like scoring/safety are hidden."""
+        if stage not in self._VISIBLE_STAGES:
+            return
         label = _STAGE_LABELS.get(stage, stage)
         self._streams[call_id] = {"stage": label, "text": accumulated_text}
-        # Keep only the most recent streams visible
-        while len(self._streams) > 6:
+        while len(self._streams) > self._max_streams:
             self._streams.popitem(last=False)
         self._refresh()
 
@@ -100,13 +131,58 @@ class ProgressDisplay:
         self._refresh()
 
     def add_event(self, stage: str, text: str) -> None:
-        """Add a transient event row (filter rejection, etc.)."""
+        """Record an event. Rejections only update the stats counter,
+        not the visible row list (stats bar already shows rejected count)."""
+        if "rejected" in text:
+            self._rejected_count += 1
+            self._refresh()
+            return
+        # Non-rejection events still show as rows
         label = _STAGE_LABELS.get(stage, stage)
         self._completed_rows.append({"num": None, "stage": label, "text": text})
         self._refresh()
 
     def _build_layout(self) -> Group:
-        """Build the full layout: progress bar + streaming rows + completed rows."""
+        """Build the full layout."""
+        parts: list[Any] = [self._progress]
+
+        # Verbose stats bar
+        if self._verbose and self._stats_provider:
+            stats = self._stats_provider()
+            stats_text = Text.assemble(
+                ("  [", "dim"),
+                ("active: ", "dim"),
+                (f"{stats.get('active', 0)}/{stats.get('max_concurrent', '?')}", "cyan"),
+                ("]  [", "dim"),
+                ("calls: ", "dim"),
+                (f"{stats.get('total_calls', 0)}", "cyan"),
+                ("]  [", "dim"),
+                ("retries: ", "dim"),
+                (
+                    f"{stats.get('retries', 0)}",
+                    "red" if stats.get("retries", 0) > 0 else "cyan",
+                ),
+                ("]  [", "dim"),
+                ("rejected: ", "dim"),
+                (f"{self._rejected_count}", "yellow" if self._rejected_count > 0 else "cyan"),
+                ("]  [", "dim"),
+                ("tokens: ", "dim"),
+                (f"{stats.get('tokens', 0):,}", "cyan"),
+                ("]  [", "dim"),
+                ("concurrency: ", "dim"),
+                (
+                    f"{stats.get('current_concurrent', '?')}/{stats.get('max_concurrent', '?')}",
+                    (
+                        "red"
+                        if stats.get("current_concurrent", 0) < stats.get("max_concurrent", 0)
+                        else "cyan"
+                    ),
+                ),
+                ("]", "dim"),
+            )
+            parts.append(stats_text)
+
+        # Sample table
         table = Table(
             show_header=False,
             show_edge=False,
@@ -119,13 +195,13 @@ class ProgressDisplay:
         table.add_column("label", width=16, no_wrap=True)
         table.add_column("text", ratio=1, no_wrap=True, overflow="ellipsis")
 
-        # Streaming rows (active LLM calls with text appearing in real-time)
+        # Streaming rows (show tail of text -- news ticker effect)
         for _call_id, stream in self._streams.items():
-            truncated = _truncate(stream["text"], self.MAX_TEXT_WIDTH)
+            tail = _truncate_tail(stream["text"], self.MAX_TEXT_WIDTH)
             table.add_row(
                 Text(" ~ ", style="yellow"),
                 Text(stream["stage"], style="yellow"),
-                Text(truncated, style="white"),
+                Text(tail, style="white"),
             )
 
         # Completed sample rows
@@ -145,7 +221,8 @@ class ProgressDisplay:
                     Text(truncated, style="dim"),
                 )
 
-        return Group(self._progress, table)
+        parts.append(table)
+        return Group(*parts)
 
     def _refresh(self) -> None:
         """Refresh the live display."""
@@ -154,8 +231,31 @@ class ProgressDisplay:
 
 
 def _truncate(text: str, max_len: int) -> str:
-    """Truncate text to max_len, replacing newlines with spaces."""
-    text = text.replace("\n", " ").replace("\r", "").strip()
+    """Truncate text to max_len, taking only the first meaningful line."""
+    for line in text.split("\n"):
+        line = line.strip()
+        if line:
+            text = line
+            break
+    else:
+        text = text.replace("\n", " ").strip()
+
+    text = text.lstrip("#").lstrip("*").lstrip("-").strip()
+
     if len(text) > max_len:
         return text[: max_len - 3] + "..."
+    return text
+
+
+def _truncate_tail(text: str, max_len: int) -> str:
+    """Show the tail of the text (last max_len chars), like a news ticker.
+
+    The display follows the latest generated token -- the user sees the
+    text being written in real-time at the end.
+    """
+    text = text.replace("\n", " ").replace("\r", "").strip()
+    text = text.lstrip("#").lstrip("*").lstrip("-").strip()
+
+    if len(text) > max_len:
+        return "..." + text[-(max_len - 3) :]
     return text

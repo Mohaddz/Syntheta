@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -52,40 +53,53 @@ class PersonaGenerator(BaseGenerator):
         # Step 1: Generate personas
         personas = await self._generate_personas()
 
-        # Step 2: Generate questions from each persona
-        batch: list[Sample] = []
+        # Step 2: Build all (persona, language) pairs
+        pairs = []
+        for persona in personas:
+            for lang in self.languages:
+                pairs.append((persona, lang))
+
+        # Step 3: Fire all question tasks, yield each as it completes
+        async def generate_questions(persona: dict, lang: str) -> list[Sample]:
+            questions = await self._generate_questions_safe(persona, lang)
+            return [
+                Sample(
+                    instruction=q,
+                    domain=self.domain,
+                    persona=(
+                        f"{persona.get('name', 'unknown')}: "
+                        f"{persona.get('background', '')}"
+                    ),
+                    language=lang,
+                )
+                for q in questions
+            ]
+
+        tasks = [asyncio.create_task(generate_questions(p, lang)) for p, lang in pairs]
         total = 0
 
-        for persona in personas:
+        for coro in asyncio.as_completed(tasks):
+            samples = await coro
+            if samples and total < n:
+                # Trim if we'd exceed n
+                remaining = n - total
+                if len(samples) > remaining:
+                    samples = samples[:remaining]
+                total += len(samples)
+                yield samples
             if total >= n:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
                 break
 
-            for lang in self.languages:
-                if total >= n:
-                    break
-
-                questions = await self._generate_questions(persona, lang)
-                for q in questions:
-                    if total >= n:
-                        break
-                    sample = Sample(
-                        instruction=q,
-                        domain=self.domain,
-                        persona=(
-                            f"{persona.get('name', 'unknown')}: "
-                            f"{persona.get('background', '')}"
-                        ),
-                        language=lang,
-                    )
-                    batch.append(sample)
-                    total += 1
-
-                    if len(batch) >= batch_size:
-                        yield batch
-                        batch = []
-
-        if batch:
-            yield batch
+    async def _generate_questions_safe(self, persona: dict, language: str) -> list[str]:
+        """Wrapper with error handling for parallel execution."""
+        try:
+            return await self._generate_questions(persona, language)
+        except Exception as e:
+            logger.warning("Question generation failed for persona=%s: %s", persona.get("name"), e)
+            return []
 
     async def _generate_personas(self) -> list[dict]:
         """Generate diverse synthetic personas via LLM."""

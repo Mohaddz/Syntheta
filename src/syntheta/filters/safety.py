@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from importlib import resources
@@ -93,58 +94,57 @@ class SafetyFilter(BaseFilter):
         return passed_layer1
 
     async def _llm_check(self, samples: list[Sample]) -> list[Sample]:
-        """Run LLM-based cultural safety check."""
+        """Run LLM-based cultural safety check in parallel."""
         if not samples:
             return samples
 
+        # Check all samples in parallel (semaphore controls concurrency)
+        tasks = [self._check_one(sample) for sample in samples]
+        await asyncio.gather(*tasks)
+
+        # Collect results
+        return [s for s in samples if s.safety_passed]
+
+    async def _check_one(self, sample: Sample) -> None:
+        """Check a single sample for cultural safety. Sets safety_passed on the sample."""
         template = load_prompt("filters.safety_check", self.prompt_overrides)
         cultural_instruction = self.custom_instruction or ""
+        content = _extract_text(sample)
+        prompt = render_template(
+            template,
+            cultural_instruction=cultural_instruction,
+            content=content,
+        )
 
-        passed = []
-        for sample in samples:
-            content = _extract_text(sample)
-            prompt = render_template(
-                template,
-                cultural_instruction=cultural_instruction,
-                content=content,
+        try:
+            result = await self.llm.complete(
+                messages=[{"role": "user", "content": prompt}],
+                stage="safety_filter",
             )
-
+            response = result["content"].strip()
             try:
-                result = await self.llm.complete(
-                    messages=[{"role": "user", "content": prompt}],
-                    stage="safety_filter",
-                )
-                response = result["content"].strip()
-                # Parse JSON response
-                try:
-                    data = json.loads(response)
-                except json.JSONDecodeError:
-                    # Try to extract JSON from response
-                    if '"safe": true' in response.lower() or '"safe":true' in response.lower():
-                        data = {"safe": True}
-                    elif '"safe": false' in response.lower() or '"safe":false' in response.lower():
-                        data = {"safe": False, "reason": "flagged by LLM"}
-                    else:
-                        # Default to safe if we can't parse
-                        data = {"safe": True}
-
-                if data.get("safe", True):
-                    sample.safety_passed = True
-                    passed.append(sample)
+                data = json.loads(response)
+            except json.JSONDecodeError:
+                if '"safe": true' in response.lower() or '"safe":true' in response.lower():
+                    data = {"safe": True}
+                elif '"safe": false' in response.lower() or '"safe":false' in response.lower():
+                    data = {"safe": False, "reason": "flagged by LLM"}
                 else:
-                    sample.safety_passed = False
-                    logger.info(
-                        "Sample %s blocked by LLM safety check: %s",
-                        sample.id,
-                        data.get("reason", "no reason"),
-                    )
-            except Exception as e:
-                # On LLM error, pass the sample through (fail-open for safety filter)
-                logger.warning("Safety check LLM error for sample %s: %s", sample.id, e)
-                sample.safety_passed = True
-                passed.append(sample)
+                    data = {"safe": True}
 
-        return passed
+            if data.get("safe", True):
+                sample.safety_passed = True
+            else:
+                sample.safety_passed = False
+                logger.info(
+                    "Sample %s blocked by LLM safety check: %s",
+                    sample.id,
+                    data.get("reason", "no reason"),
+                )
+        except Exception as e:
+            # On LLM error, pass the sample through (fail-open)
+            logger.warning("Safety check LLM error for sample %s: %s", sample.id, e)
+            sample.safety_passed = True
 
 
 def _extract_text(sample: Sample) -> str:

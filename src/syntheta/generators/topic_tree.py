@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -79,7 +80,11 @@ class TopicTreeGenerator(BaseGenerator):
         self._rng = create_rng(seed)
 
     async def generate(self, n: int, batch_size: int = 100) -> AsyncIterator[list[Sample]]:
-        """Build topic tree, plan distribution, generate instructions in batches."""
+        """Build topic tree, plan distribution, generate instructions concurrently.
+
+        Yields individual samples as they complete -- no chunking, no waiting
+        for all instructions to finish. The LLM semaphore controls concurrency.
+        """
         # Step 1: Build topic tree
         tree = await self._build_tree()
         topics = tree.flatten()
@@ -90,27 +95,35 @@ class TopicTreeGenerator(BaseGenerator):
         # Step 2: Plan distribution
         plan = self._plan_distribution(topics, n)
 
-        # Step 3: Generate instructions in batches
-        batch: list[Sample] = []
-        for entry in plan:
-            instructions = await self._generate_instructions(entry)
-            for instruction in instructions:
-                sample = Sample(
-                    instruction=instruction,
+        # Step 3: Fire all instruction tasks, yield each sample as it completes
+        async def generate_sample(entry: PlanEntry) -> list[Sample]:
+            instructions = await self._generate_one(entry)
+            return [
+                Sample(
+                    instruction=inst,
                     domain=self.domain,
                     topic=entry.topic,
                     task_type=entry.task_type,
                     language=entry.language,
                     difficulty=entry.difficulty,
                 )
-                batch.append(sample)
+                for inst in instructions
+            ]
 
-                if len(batch) >= batch_size:
-                    yield batch
-                    batch = []
+        tasks = [asyncio.create_task(generate_sample(entry)) for entry in plan]
 
-        if batch:
-            yield batch
+        for coro in asyncio.as_completed(tasks):
+            samples = await coro
+            if samples:
+                yield samples
+
+    async def _generate_one(self, entry: PlanEntry) -> list[str]:
+        """Generate instructions for a single plan entry. Safe for parallel execution."""
+        try:
+            return await self._generate_instructions(entry)
+        except Exception as e:
+            logger.warning("Instruction generation failed for topic=%s: %s", entry.topic, e)
+            return []
 
     async def _build_tree(self) -> TopicNode:
         """Build a hierarchical topic tree via LLM. Retries on malformed JSON."""

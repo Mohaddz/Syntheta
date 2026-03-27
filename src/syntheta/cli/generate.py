@@ -108,7 +108,10 @@ def _run_pipeline(config: dict, resume: bool) -> None:
 
     # Build LLM
     llm_cfg = config["llm"]
-    api_key = os.environ.get(llm_cfg.get("api_key_env", "OPENAI_API_KEY"))
+    # Support both llm.api_key (direct value) and llm.api_key_env (env var name)
+    api_key = llm_cfg.get("api_key") or os.environ.get(
+        llm_cfg.get("api_key_env", "OPENAI_API_KEY")
+    )
     llm = OpenAICompatibleLLM(
         model=llm_cfg["model"],
         response_model=llm_cfg.get("response_model"),
@@ -120,6 +123,7 @@ def _run_pipeline(config: dict, resume: bool) -> None:
         max_retries=llm_cfg.get("max_retries", 3),
         timeout=llm_cfg.get("timeout", 60),
         pricing=llm_cfg.get("pricing"),
+        disable_thinking=llm_cfg.get("disable_thinking", False),
     )
 
     # Build generator
@@ -174,6 +178,7 @@ def _run_pipeline(config: dict, resume: bool) -> None:
         transformers.append(
             ResponseGenerator(
                 use_cot=config.get("responses", {}).get("use_cot", False),
+                max_tokens=config.get("responses", {}).get("max_tokens"),
                 prompt_overrides=prompt_overrides,
                 llm=llm,
             )
@@ -219,7 +224,7 @@ def _run_pipeline(config: dict, resume: bool) -> None:
         filters=filters,
         llm=llm,
         seed=config.get("seed"),
-        over_generate_factor=config.get("over_generate_factor", 1.2),
+        over_generate_factor=config.get("over_generate_factor", 1.0),
         batch_size=config.get("batch_size", 100),
     )
 

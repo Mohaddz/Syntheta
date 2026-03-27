@@ -24,12 +24,14 @@ class ResponseGenerator(BaseTransformer):
         self,
         use_cot: bool = False,
         system_prompt: str | None = None,
+        max_tokens: int | None = None,
         prompt_overrides: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.use_cot = use_cot
         self.system_prompt = system_prompt or "You are a helpful, accurate assistant."
+        self.max_tokens = max_tokens
         self.prompt_overrides = prompt_overrides
 
     async def transform(self, samples: list[Sample]) -> list[Sample]:
@@ -60,15 +62,22 @@ class ResponseGenerator(BaseTransformer):
             message_batches.append(messages)
 
         # Concurrent batch completion using response_model role
+        kwargs: dict[str, Any] = {}
+        if self.max_tokens:
+            kwargs["max_tokens"] = self.max_tokens
+
         results = await self.llm.complete_batch(
             message_batches,
             model_role="response_model",
             stage="response_generator",
+            **kwargs,
         )
 
-        # Attach responses to samples
+        # Attach responses to samples (skip empty ones)
         for sample, result in zip(needs_response, results):
-            sample.response = result["content"]
-            sample.generation_model = result.get("model")
+            content = result["content"].strip() if result.get("content") else ""
+            if content:
+                sample.response = content
+                sample.generation_model = result.get("model")
 
         return samples

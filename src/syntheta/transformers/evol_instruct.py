@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -47,32 +48,47 @@ class EvolInstruct(BaseTransformer):
                 raise ValueError(f"Unknown strategy '{s}'. Choose from: {STRATEGIES}")
 
     async def transform(self, samples: list[Sample]) -> list[Sample]:
-        """Apply evolution rounds to each sample."""
+        """Apply evolution rounds. Parallel within each round, sequential across rounds."""
         for _round in range(self.rounds):
-            for sample in samples:
-                if not sample.instruction:
-                    continue
+            # Pre-assign strategies for all samples (preserves deterministic RNG order)
+            evolvable = [(i, s) for i, s in enumerate(samples) if s.instruction]
+            assignments = [
+                (idx, sample, self._rng.choice(self.strategies))
+                for idx, sample in evolvable
+            ]
 
-                strategy = self._rng.choice(self.strategies)
-                template = load_prompt(f"transformers.evol_{strategy}", self.prompt_overrides)
-                prompt = render_template(template, instruction=sample.instruction)
+            # Fire all evolutions in parallel within this round
+            tasks = [
+                self._evolve_one(sample, strategy)
+                for _idx, sample, strategy in assignments
+            ]
+            results = await asyncio.gather(*tasks)
 
-                try:
-                    result = await self.llm.complete(
-                        messages=[{"role": "user", "content": prompt}],
-                        stage="evol_instruct",
-                    )
-                    evolved = result["content"].strip()
-                    if evolved:
-                        sample.instruction = evolved
-                        sample.evolution_history.append(strategy)
-                except Exception as e:
-                    logger.warning(
-                        "Evolution failed for sample %s (strategy=%s): %s",
-                        sample.id,
-                        strategy,
-                        e,
-                    )
-                    # Keep original instruction on failure
+            # Apply results
+            for (_idx, sample, strategy), evolved in zip(assignments, results):
+                if evolved is not None:
+                    sample.instruction = evolved
+                    sample.evolution_history.append(strategy)
 
         return samples
+
+    async def _evolve_one(self, sample: Sample, strategy: str) -> str | None:
+        """Evolve a single sample's instruction. Returns new instruction or None on failure."""
+        template = load_prompt(f"transformers.evol_{strategy}", self.prompt_overrides)
+        prompt = render_template(template, instruction=sample.instruction)
+
+        try:
+            result = await self.llm.complete(
+                messages=[{"role": "user", "content": prompt}],
+                stage="evol_instruct",
+            )
+            evolved = result["content"].strip()
+            return evolved if evolved else None
+        except Exception as e:
+            logger.warning(
+                "Evolution failed for sample %s (strategy=%s): %s",
+                sample.id,
+                strategy,
+                e,
+            )
+            return None

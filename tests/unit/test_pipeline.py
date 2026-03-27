@@ -14,7 +14,6 @@ class DummyGenerator(BaseGenerator):
 
     async def generate(self, n: int, batch_size: int = 100) -> AsyncIterator[list[Sample]]:
         generated = 0
-        batch_num = 0
         while generated < n:
             batch = []
             for i in range(min(batch_size, n - generated)):
@@ -26,7 +25,6 @@ class DummyGenerator(BaseGenerator):
                     )
                 )
             generated += len(batch)
-            batch_num += 1
             yield batch
 
 
@@ -49,7 +47,6 @@ class EvenFilter(BaseFilter):
         result = []
         for s in samples:
             if s.instruction:
-                # Extract number from "Question N" or "QUESTION N"
                 num_str = s.instruction.split()[-1]
                 try:
                     if int(num_str) % 2 == 0:
@@ -65,6 +62,7 @@ class TestPipeline:
             generator=DummyGenerator(),
             batch_size=5,
             over_generate_factor=1.0,
+            show_progress=False,
         )
         ds = pipe.run(
             n=10,
@@ -80,6 +78,7 @@ class TestPipeline:
             transformers=[UpperTransformer()],
             batch_size=5,
             over_generate_factor=1.0,
+            show_progress=False,
         )
         ds = pipe.run(
             n=5,
@@ -93,7 +92,8 @@ class TestPipeline:
             generator=DummyGenerator(),
             filters=[EvenFilter()],
             batch_size=10,
-            over_generate_factor=2.0,  # Over-generate to get enough even samples
+            over_generate_factor=2.0,
+            show_progress=False,
         )
         ds = pipe.run(
             n=5,
@@ -101,7 +101,6 @@ class TestPipeline:
             checkpoint_path=tmp_path / "ckpt",
         )
         assert len(ds) == 5
-        # Filter summary should show rejections
         assert pipe.filter_summary.total_rejected > 0
         assert "odd_index" in pipe.filter_summary.rejections
 
@@ -110,6 +109,7 @@ class TestPipeline:
             generator=DummyGenerator(),
             batch_size=5,
             over_generate_factor=1.0,
+            show_progress=False,
         )
         pipe.run(
             n=10,
@@ -118,6 +118,21 @@ class TestPipeline:
         )
         assert (tmp_path / "ckpt" / "state.json").exists()
 
+    def test_pipeline_exact_count(self, tmp_path):
+        """Pipeline should produce exactly n samples, not more."""
+        pipe = Pipeline(
+            generator=DummyGenerator(),
+            batch_size=10,
+            over_generate_factor=1.5,
+            show_progress=False,
+        )
+        ds = pipe.run(
+            n=10,
+            output=tmp_path / "out.jsonl",
+            checkpoint_path=tmp_path / "ckpt",
+        )
+        assert len(ds) == 10
+
     def test_pipeline_over_generation_with_filter(self, tmp_path):
         """Over-generation compensates for filter losses."""
         pipe = Pipeline(
@@ -125,6 +140,7 @@ class TestPipeline:
             filters=[EvenFilter()],
             batch_size=10,
             over_generate_factor=2.0,
+            show_progress=False,
         )
         ds = pipe.run(
             n=5,
@@ -132,6 +148,4 @@ class TestPipeline:
             checkpoint_path=tmp_path / "ckpt",
         )
         assert len(ds) == 5
-        # Total generated should be more than 5 due to over-generation
-        assert pipe.filter_summary.total_generated >= 10
         assert pipe.filter_summary.total_rejected > 0
