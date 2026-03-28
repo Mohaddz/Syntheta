@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from syntheta.exceptions import CheckpointError
 
@@ -16,35 +16,33 @@ logger = logging.getLogger("syntheta.checkpoint")
 class CheckpointState:
     """Represents the state of a pipeline at a checkpoint."""
 
+    _KNOWN_FIELDS: ClassVar[set[str]] = {
+        "total_generated", "total_passed", "config_hash", "filter_stats",
+    }
+
     def __init__(
         self,
-        batch_num: int = 0,
         total_generated: int = 0,
         total_passed: int = 0,
         config_hash: str = "",
         filter_stats: dict[str, int] | None = None,
-        cost_usage: dict[str, Any] | None = None,
     ) -> None:
-        self.batch_num = batch_num
         self.total_generated = total_generated
         self.total_passed = total_passed
         self.config_hash = config_hash
         self.filter_stats = filter_stats or {}
-        self.cost_usage = cost_usage or {}
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "batch_num": self.batch_num,
             "total_generated": self.total_generated,
             "total_passed": self.total_passed,
             "config_hash": self.config_hash,
             "filter_stats": self.filter_stats,
-            "cost_usage": self.cost_usage,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> CheckpointState:
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls._KNOWN_FIELDS})
 
 
 class CheckpointManager:
@@ -56,11 +54,14 @@ class CheckpointManager:
         self._state_file = self.checkpoint_path / "state.json"
 
     def save(self, state: CheckpointState) -> None:
-        """Save current state to state.json."""
+        """Save current state to state.json (atomic via temp + rename)."""
+        tmp = self._state_file.with_suffix(".json.tmp")
         try:
-            with self._state_file.open("w", encoding="utf-8") as f:
+            with tmp.open("w", encoding="utf-8") as f:
                 json.dump(state.to_dict(), f, indent=2)
-            logger.debug("Checkpoint saved: batch %d", state.batch_num)
+                f.flush()
+            tmp.replace(self._state_file)
+            logger.debug("Checkpoint saved: %d passed", state.total_passed)
         except OSError as e:
             raise CheckpointError(f"Failed to save checkpoint: {e}") from e
 

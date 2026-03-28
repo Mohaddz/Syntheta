@@ -71,23 +71,29 @@ class Pipeline:
         self,
         n: int,
         output: str | Path = "output.jsonl",
-        checkpoint_path: str | Path = "./checkpoints",
+        checkpoint_path: str | Path | None = None,
         resume: bool = False,
         config_dict: dict[str, Any] | None = None,
+        checkpoint_interval: int = 100,
     ) -> SynthDataset:
         """Run the pipeline synchronously."""
-        return asyncio.run(self._run(n, output, checkpoint_path, resume, config_dict))
+        return asyncio.run(
+            self._run(n, output, checkpoint_path, resume, config_dict, checkpoint_interval)
+        )
 
     async def _run(
         self,
         n: int,
         output: str | Path,
-        checkpoint_path: str | Path,
+        checkpoint_path: str | Path | None,
         resume: bool,
         config_dict: dict[str, Any] | None,
+        checkpoint_interval: int,
     ) -> SynthDataset:
         """Sample-level concurrent pipeline execution."""
         output = Path(output)
+        if checkpoint_path is None:
+            checkpoint_path = output.parent / f"{output.stem}_checkpoints"
         checkpoint_path = Path(checkpoint_path)
 
         writer = JSONLWriter(output, resume=resume)
@@ -98,7 +104,7 @@ class Pipeline:
         if resume:
             state = ckpt_mgr.load()
             if state is not None:
-                if state.config_hash and state.config_hash != config_hash:
+                if state.config_hash != config_hash:
                     raise ConfigHashMismatchError(
                         "Config has changed since the last run. "
                         "Use a new checkpoint_path or remove the existing checkpoint."
@@ -225,10 +231,9 @@ class Pipeline:
                 display.add_completed_sample(current, text)
                 display.update_progress(current)
 
-            # Periodic checkpoint every 100 samples
-            if current % 100 == 0:
+            # Periodic checkpoint
+            if checkpoint_interval > 0 and current % checkpoint_interval == 0:
                 state = CheckpointState(
-                    batch_num=0,
                     total_generated=self.filter_summary.total_generated,
                     total_passed=current,
                     config_hash=config_hash,
@@ -242,8 +247,8 @@ class Pipeline:
             return sample
 
         try:
-            # Generate n samples, process concurrently, generate more if needed
-            remaining = n
+            # Generate samples, process concurrently, generate more if needed
+            remaining = n - passed_count
             max_rounds = 5
 
             for _round in range(max_rounds):
@@ -297,7 +302,6 @@ class Pipeline:
 
         # Save checkpoint
         state = CheckpointState(
-            batch_num=0,
             total_generated=self.filter_summary.total_generated,
             total_passed=self.filter_summary.total_passed,
             config_hash=config_hash,

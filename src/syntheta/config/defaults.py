@@ -58,7 +58,8 @@ DEFAULTS = {
         "disable_thinking": False,
     },
     "output": "output.jsonl",
-    "checkpoint_path": "./checkpoints",
+    "checkpoint_path": None,
+    "checkpoint_interval": 100,
     "log_prompts": False,
     "prompts": {},
 }

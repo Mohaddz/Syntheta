@@ -230,9 +230,10 @@ def _run_pipeline(config: dict, resume: bool) -> None:
     dataset = pipe.run(
         n=config["n"],
         output=config["output"],
-        checkpoint_path=config.get("checkpoint_path", "./checkpoints"),
+        checkpoint_path=config.get("checkpoint_path"),
         resume=resume,
         config_dict=config,
+        checkpoint_interval=config.get("checkpoint_interval", 100),
     )
 
     click.echo(f"\nGenerated {len(dataset)} samples → {config['output']}")
