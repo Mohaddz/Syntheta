@@ -12,20 +12,15 @@ from syntheta.schema.sample import Sample
 class DummyGenerator(BaseGenerator):
     """Generates samples with sequential instructions."""
 
-    async def generate(self, n: int, batch_size: int = 100) -> AsyncIterator[list[Sample]]:
-        generated = 0
-        while generated < n:
-            batch = []
-            for i in range(min(batch_size, n - generated)):
-                batch.append(
-                    Sample(
-                        instruction=f"Question {generated + i}",
-                        response=f"Answer {generated + i} with enough detail to be useful.",
-                        domain="test",
-                    )
+    async def generate(self, n: int) -> AsyncIterator[list[Sample]]:
+        for i in range(n):
+            yield [
+                Sample(
+                    instruction=f"Question {i}",
+                    response=f"Answer {i} with enough detail to be useful.",
+                    domain="test",
                 )
-            generated += len(batch)
-            yield batch
+            ]
 
 
 class UpperTransformer(BaseTransformer):
@@ -60,7 +55,7 @@ class TestPipeline:
     def test_basic_pipeline(self, tmp_path):
         pipe = Pipeline(
             generator=DummyGenerator(),
-            batch_size=5,
+
             over_generate_factor=1.0,
             show_progress=False,
         )
@@ -76,7 +71,7 @@ class TestPipeline:
         pipe = Pipeline(
             generator=DummyGenerator(),
             transformers=[UpperTransformer()],
-            batch_size=5,
+
             over_generate_factor=1.0,
             show_progress=False,
         )
@@ -91,7 +86,7 @@ class TestPipeline:
         pipe = Pipeline(
             generator=DummyGenerator(),
             filters=[EvenFilter()],
-            batch_size=10,
+
             over_generate_factor=2.0,
             show_progress=False,
         )
@@ -107,7 +102,7 @@ class TestPipeline:
     def test_pipeline_creates_checkpoint(self, tmp_path):
         pipe = Pipeline(
             generator=DummyGenerator(),
-            batch_size=5,
+
             over_generate_factor=1.0,
             show_progress=False,
         )
@@ -122,7 +117,7 @@ class TestPipeline:
         """Pipeline should produce exactly n samples, not more."""
         pipe = Pipeline(
             generator=DummyGenerator(),
-            batch_size=10,
+
             over_generate_factor=1.5,
             show_progress=False,
         )
@@ -138,7 +133,7 @@ class TestPipeline:
         pipe = Pipeline(
             generator=DummyGenerator(),
             filters=[EvenFilter()],
-            batch_size=10,
+
             over_generate_factor=2.0,
             show_progress=False,
         )

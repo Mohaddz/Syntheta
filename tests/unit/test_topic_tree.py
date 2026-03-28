@@ -109,7 +109,7 @@ class TestTopicTreeGenerator:
         )
 
         batches = []
-        async for batch in gen.generate(n=5, batch_size=3):
+        async for batch in gen.generate(n=5):
             batches.append(batch)
 
         all_samples = [s for b in batches for s in b]

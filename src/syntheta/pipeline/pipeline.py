@@ -45,7 +45,6 @@ class Pipeline:
         llm: OpenAICompatibleLLM | None = None,
         seed: int | None = None,
         over_generate_factor: float = 1.0,
-        batch_size: int = 100,
         show_progress: bool = True,
     ) -> None:
         self.generator = generator
@@ -54,7 +53,6 @@ class Pipeline:
         self.llm = llm
         self.seed = seed
         self.over_generate_factor = over_generate_factor
-        self.batch_size = batch_size
         self.show_progress = show_progress
         self.filter_summary = FilterSummary()
 
@@ -121,16 +119,26 @@ class Pipeline:
             max_streams = self.llm.rate_limiter.max_concurrent if self.llm else 10
             display = ProgressDisplay(target_n=n, max_streams=max_streams)
 
+        sample_tok_rates: list[float] = []  # Track tok/s per completed sample
+
+        if display:
             # Wire stats provider for live stats bar
             if self.llm:
                 llm_ref = self.llm
+                stats_start_time = time.time()
 
                 def get_stats() -> dict:
+                    elapsed = time.time() - stats_start_time
+                    total_tokens = llm_ref.cost_tracker.total_tokens
+                    tok_per_sec = total_tokens / elapsed if elapsed > 0 else 0
+                    avg_tok_rate = sum(sample_tok_rates) / len(sample_tok_rates) if sample_tok_rates else 0
                     return {
                         "active": llm_ref.active_calls,
                         "total_calls": llm_ref.total_calls,
                         "retries": llm_ref.total_retries,
-                        "tokens": llm_ref.cost_tracker.total_tokens,
+                        "tokens": total_tokens,
+                        "tok_per_sec": tok_per_sec,
+                        "avg_sample_tok_rate": avg_tok_rate,
                         "current_concurrent": llm_ref.rate_limiter.current_concurrent,
                         "max_concurrent": llm_ref.rate_limiter.max_concurrent,
                     }
@@ -151,6 +159,8 @@ class Pipeline:
         async def process_sample(sample: Sample) -> Sample | None:
             """Run one sample through transformers -> filters."""
             nonlocal passed_count
+            sample_start = time.time()
+            tokens_before = self.llm.cost_tracker.total_tokens if self.llm else 0
 
             if done_event.is_set():
                 return None
@@ -205,6 +215,10 @@ class Pipeline:
 
             await writer.write_sample(sample)
             self.filter_summary.record_passed(1)
+            sample_dur = time.time() - sample_start
+            tokens_used = (self.llm.cost_tracker.total_tokens - tokens_before) if self.llm else 0
+            if sample_dur > 0 and tokens_used > 0:
+                sample_tok_rates.append(tokens_used / sample_dur)
 
             if display:
                 text = sample.instruction or sample.text or ""
@@ -239,7 +253,7 @@ class Pipeline:
                 # Stream from generator -- create tasks as samples arrive,
                 # don't collect all into memory first
                 tasks: list[asyncio.Task] = []
-                async for batch in self.generator.generate(remaining, self.batch_size):
+                async for batch in self.generator.generate(remaining):
                     self.filter_summary.record_generated(len(batch))
                     for sample in batch:
                         if done_event.is_set():

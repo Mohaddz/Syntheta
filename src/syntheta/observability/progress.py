@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
 from typing import Any
@@ -62,6 +63,7 @@ class ProgressDisplay:
         self._live: Live | None = None
         self._stats_provider: StatsProvider | None = None
         self._rejected_count = 0
+        self._last_refresh: float = 0.0
 
         # Streaming rows: call_id -> {stage, text}
         self._streams: OrderedDict[str, dict[str, str]] = OrderedDict()
@@ -111,14 +113,23 @@ class ProgressDisplay:
     def on_token(self, call_id: str, stage: str, accumulated_text: str) -> None:
         """Called for each token chunk from the LLM.
         Only shows streaming rows for content-producing stages (generating,
-        responding, evolving). Internal stages like scoring/safety are hidden."""
+        responding, evolving). Internal stages like scoring/safety are hidden.
+
+        Refreshes are throttled to avoid choking the event loop at high
+        concurrency (250 streams × many tokens/sec = thousands of calls).
+        """
         if stage not in self._VISIBLE_STAGES:
             return
         label = _STAGE_LABELS.get(stage, stage)
         self._streams[call_id] = {"stage": label, "text": accumulated_text}
         while len(self._streams) > self._max_streams:
             self._streams.popitem(last=False)
-        self._refresh()
+
+        # Throttle: refresh at most 12 times/sec (matches Rich Live refresh rate)
+        now = time.monotonic()
+        if now - self._last_refresh >= 0.083:
+            self._last_refresh = now
+            self._refresh()
 
     def finish_stream(self, call_id: str) -> None:
         """Remove a streaming row when that LLM call is done."""
@@ -168,6 +179,17 @@ class ProgressDisplay:
                 ("]  [", "dim"),
                 ("tokens: ", "dim"),
                 (f"{stats.get('tokens', 0):,}", "cyan"),
+                ("]  [", "dim"),
+                ("tok/s: ", "dim"),
+                (f"{stats.get('tok_per_sec', 0):,.0f}", "cyan"),
+                ("]  [", "dim"),
+                ("tok/s/sample: ", "dim"),
+                (
+                    f"{stats.get('avg_sample_tok_rate', 0):,.0f}"
+                    if stats.get("avg_sample_tok_rate", 0) > 0
+                    else "—",
+                    "cyan",
+                ),
                 ("]  [", "dim"),
                 ("concurrency: ", "dim"),
                 (

@@ -43,7 +43,7 @@ class SeedDatasetGenerator(BaseGenerator):
         self.prompt_overrides = prompt_overrides
         self._rng = create_rng(seed)
 
-    async def generate(self, n: int, batch_size: int = 100) -> AsyncIterator[list[Sample]]:
+    async def generate(self, n: int) -> AsyncIterator[list[Sample]]:
         """Load seed data, sample few-shot examples, generate new instructions iteratively."""
         # Load seed data
         records = list(read_jsonl(self.source))
@@ -55,7 +55,6 @@ class SeedDatasetGenerator(BaseGenerator):
             return
 
         template = load_prompt("generators.seed_instruct", self.prompt_overrides)
-        batch: list[Sample] = []
         total = 0
 
         while total < n:
@@ -78,6 +77,7 @@ class SeedDatasetGenerator(BaseGenerator):
             except (json.JSONDecodeError, TypeError):
                 new_instructions = [result["content"].strip()]
 
+            batch: list[Sample] = []
             for inst in new_instructions:
                 if total >= n:
                     break
@@ -91,9 +91,5 @@ class SeedDatasetGenerator(BaseGenerator):
                 batch.append(sample)
                 total += 1
 
-                if len(batch) >= batch_size:
-                    yield batch
-                    batch = []
-
-        if batch:
-            yield batch
+            if batch:
+                yield batch

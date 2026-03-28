@@ -17,13 +17,23 @@ class BaseGenerator(ABC):
     def __init__(self, llm: OpenAICompatibleLLM | None = None, **kwargs) -> None:
         self.llm = llm
 
+    @property
+    def max_concurrent(self) -> int:
+        """Max concurrent LLM calls from the rate limiter. Used as sliding window size."""
+        try:
+            val = self.llm.rate_limiter.max_concurrent
+            if isinstance(val, int):
+                return val
+        except (AttributeError, TypeError):
+            pass
+        return 10
+
     @abstractmethod
-    async def generate(self, n: int, batch_size: int = 100) -> AsyncIterator[list[Sample]]:
+    async def generate(self, n: int) -> AsyncIterator[list[Sample]]:
         """Yield batches of samples.
 
         Args:
             n: Total number of samples to generate.
-            batch_size: Number of samples per batch.
         """
         yield []  # type: ignore[misc]
 

@@ -48,7 +48,7 @@ class PersonaGenerator(BaseGenerator):
         self.prompt_overrides = prompt_overrides
         self._rng = create_rng(seed)
 
-    async def generate(self, n: int, batch_size: int = 100) -> AsyncIterator[list[Sample]]:
+    async def generate(self, n: int) -> AsyncIterator[list[Sample]]:
         """Generate personas, then generate questions from each persona's perspective."""
         # Step 1: Generate personas
         personas = await self._generate_personas()
@@ -75,23 +75,44 @@ class PersonaGenerator(BaseGenerator):
                 for q in questions
             ]
 
-        tasks = [asyncio.create_task(generate_questions(p, lang)) for p, lang in pairs]
+        # Sliding window: only max_concurrent tasks in flight at once
+        window = min(self.max_concurrent, len(pairs))
+        pending: set[asyncio.Task] = set()
+        pair_idx = 0
         total = 0
 
-        for coro in asyncio.as_completed(tasks):
-            samples = await coro
-            if samples and total < n:
-                # Trim if we'd exceed n
-                remaining = n - total
-                if len(samples) > remaining:
-                    samples = samples[:remaining]
-                total += len(samples)
-                yield samples
-            if total >= n:
-                for t in tasks:
-                    if not t.done():
+        # Seed the window
+        while pair_idx < window:
+            p, lang = pairs[pair_idx]
+            pending.add(asyncio.create_task(generate_questions(p, lang)))
+            pair_idx += 1
+
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # Refill
+            for _ in done:
+                if pair_idx < len(pairs):
+                    p, lang = pairs[pair_idx]
+                    pending.add(asyncio.create_task(generate_questions(p, lang)))
+                    pair_idx += 1
+
+            for task in done:
+                samples = task.result()
+                if samples and total < n:
+                    remaining_n = n - total
+                    if len(samples) > remaining_n:
+                        samples = samples[:remaining_n]
+                    total += len(samples)
+                    yield samples
+
+                if total >= n:
+                    for t in pending:
                         t.cancel()
-                break
+                    pending.clear()
+                    return
 
     async def _generate_questions_safe(self, persona: dict, language: str) -> list[str]:
         """Wrapper with error handling for parallel execution."""

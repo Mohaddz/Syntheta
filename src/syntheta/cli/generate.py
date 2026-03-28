@@ -121,7 +121,7 @@ def _run_pipeline(config: dict, resume: bool) -> None:
         api_key_env=llm_cfg.get("api_key_env", "OPENAI_API_KEY"),
         max_concurrent=llm_cfg.get("max_concurrent", 10),
         max_retries=llm_cfg.get("max_retries", 3),
-        timeout=llm_cfg.get("timeout", 60),
+        timeout=llm_cfg.get("timeout", 300),
         pricing=llm_cfg.get("pricing"),
         disable_thinking=llm_cfg.get("disable_thinking", False),
     )
@@ -225,7 +225,6 @@ def _run_pipeline(config: dict, resume: bool) -> None:
         llm=llm,
         seed=config.get("seed"),
         over_generate_factor=config.get("over_generate_factor", 1.0),
-        batch_size=config.get("batch_size", 100),
     )
 
     dataset = pipe.run(

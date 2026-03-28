@@ -79,7 +79,7 @@ class TopicTreeGenerator(BaseGenerator):
         self.prompt_overrides = prompt_overrides
         self._rng = create_rng(seed)
 
-    async def generate(self, n: int, batch_size: int = 100) -> AsyncIterator[list[Sample]]:
+    async def generate(self, n: int) -> AsyncIterator[list[Sample]]:
         """Build topic tree, plan distribution, generate instructions concurrently.
 
         Yields individual samples as they complete -- no chunking, no waiting
@@ -95,7 +95,9 @@ class TopicTreeGenerator(BaseGenerator):
         # Step 2: Plan distribution
         plan = self._plan_distribution(topics, n)
 
-        # Step 3: Fire all instruction tasks, yield each sample as it completes
+        # Step 3: Generate instructions with a sliding window.
+        # Only max_concurrent tasks exist at any time so downstream pipeline
+        # tasks (response generation, filtering) can share the semaphore fairly.
         async def generate_sample(entry: PlanEntry) -> list[Sample]:
             instructions = await self._generate_one(entry)
             return [
@@ -110,12 +112,31 @@ class TopicTreeGenerator(BaseGenerator):
                 for inst in instructions
             ]
 
-        tasks = [asyncio.create_task(generate_sample(entry)) for entry in plan]
+        window = min(self.max_concurrent, len(plan))
+        pending: set[asyncio.Task] = set()
+        idx = 0
 
-        for coro in asyncio.as_completed(tasks):
-            samples = await coro
-            if samples:
-                yield samples
+        # Seed the window
+        while idx < window:
+            pending.add(asyncio.create_task(generate_sample(plan[idx])))
+            idx += 1
+
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # Refill: one replacement per completed task
+            for _ in done:
+                if idx < len(plan):
+                    pending.add(asyncio.create_task(generate_sample(plan[idx])))
+                    idx += 1
+
+            # Yield completed samples immediately
+            for task in done:
+                samples = task.result()
+                if samples:
+                    yield samples
 
     async def _generate_one(self, entry: PlanEntry) -> list[str]:
         """Generate instructions for a single plan entry. Safe for parallel execution."""

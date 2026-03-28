@@ -22,7 +22,7 @@ class TestTopicTreeE2E:
         )
 
         all_samples = []
-        async for batch in gen.generate(n=3, batch_size=5):
+        async for batch in gen.generate(n=3):
             all_samples.extend(batch)
 
         assert len(all_samples) >= 3

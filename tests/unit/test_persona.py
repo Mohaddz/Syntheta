@@ -36,7 +36,7 @@ class TestPersonaGenerator:
             llm=mock_llm,
         )
         batches = []
-        async for batch in gen.generate(n=4, batch_size=10):
+        async for batch in gen.generate(n=4):
             batches.append(batch)
 
         all_samples = [s for b in batches for s in b]
@@ -48,6 +48,6 @@ class TestPersonaGenerator:
     async def test_respects_n_limit(self, mock_llm):
         gen = PersonaGenerator(domain="Test", n_personas=2, questions_per_persona=5, llm=mock_llm)
         all_samples = []
-        async for batch in gen.generate(n=2, batch_size=10):
+        async for batch in gen.generate(n=2):
             all_samples.extend(batch)
         assert len(all_samples) == 2

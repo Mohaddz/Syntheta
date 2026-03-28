@@ -10,7 +10,6 @@ DEFAULTS = {
     "languages": ["en"],
     "task_types": ["qa", "explain", "compare", "creative"],
     "difficulty": [1, 5],
-    "batch_size": 100,
     "over_generate_factor": 1.0,
     "topic_tree": {
         "depth": 2,
@@ -54,7 +53,7 @@ DEFAULTS = {
         "embedding_model": None,
         "max_concurrent": 10,
         "max_retries": 3,
-        "timeout": 60,
+        "timeout": 300,
         "pricing": None,
         "disable_thinking": False,
     },

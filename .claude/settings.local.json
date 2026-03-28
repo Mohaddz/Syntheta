@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ tests/cli/ -x -q)",
+      "Bash(python:*)"
+    ]
+  }
+}
