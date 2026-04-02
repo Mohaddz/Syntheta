@@ -1,0 +1,23 @@
+You are analyzing a set of data samples to identify the single most significant dimension that differentiates them.
+
+Domain: {{domain}}
+{{description}}
+Current subspace: {{subspace_description}}
+
+Here are the samples (indexed):
+{{indexed_samples}}
+
+Excluded dimensions (DO NOT use any of these): {{excluded_dimensions}}
+
+Identify the SINGLE most important dimension along which these samples naturally differ. The dimension must partition the samples into mutually exclusive attribute values — each sample belongs to exactly one attribute value.
+
+Rules:
+- The dimension name should be a concise, descriptive label (e.g. "topic_area", "complexity_level", "reasoning_type")
+- Each sample index must appear in exactly one attribute value's list
+- All sample indices (0 through N-1) must be assigned
+- There must be at least 2 attribute values
+- Do NOT create a catch-all "other" or "miscellaneous" category
+- Do NOT use any of the excluded dimensions listed above
+
+Output ONLY a valid JSON object (no markdown, no explanation):
+{"dimension": "dimension_name", "attributes": {"attribute_value_1": [0, 3, 5], "attribute_value_2": [1, 2], "attribute_value_3": [4, 6, 7, 8, 9]}}

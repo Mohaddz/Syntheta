@@ -5,6 +5,7 @@ DEFAULTS = {
     "task": "generate",
     "seed": None,
     "domain": "general",
+    "description": None,
     "n": 100,
     "method": "topic_tree",
     "languages": ["en"],
@@ -12,8 +13,9 @@ DEFAULTS = {
     "difficulty": [1, 5],
     "over_generate_factor": 1.0,
     "topic_tree": {
-        "depth": 2,
-        "breadth": 5,
+        "max_depth": 4,
+        "num_samples_per_node": 10,
+        "max_attribute_count": 50,
     },
     "evolve": {
         "enabled": False,

@@ -1,4 +1,9 @@
-"""TopicTreeGenerator: generates instructions from scratch using a hierarchical topic tree."""
+"""TopicTreeGenerator: spatial-partitioning tree for diverse instruction generation.
+
+Implements the TreeSynth algorithm (Wang et al., 2025 — arxiv.org/abs/2503.17195).
+Builds a BFS tree where each node discovers a differentiating dimension and splits
+the data space along it, then generates instructions from leaf subspaces.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from syntheta.exceptions import MalformedResponseError
 from syntheta.pipeline.base import BaseGenerator
 from syntheta.pipeline.registry import register_generator
 from syntheta.prompts import load_prompt, render_template
@@ -19,205 +23,474 @@ from syntheta.utils.seeding import create_rng
 logger = logging.getLogger("syntheta.generators.topic_tree")
 
 
-@dataclass
-class TopicNode:
-    """A node in the topic tree."""
-
-    name: str
-    description: str = ""
-    subtopics: list[TopicNode] = field(default_factory=list)
-
-    def flatten(self) -> list[str]:
-        """Return all leaf topic names."""
-        if not self.subtopics:
-            return [self.name]
-        leaves = []
-        for sub in self.subtopics:
-            leaves.extend(sub.flatten())
-        return leaves
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
 
 
 @dataclass
-class PlanEntry:
-    """One planned generation: topic × task_type × language × difficulty."""
+class TreeNode:
+    """A node in the spatial-partitioning tree.
 
-    topic: str
+    Each internal node represents a split along a discovered *dimension*
+    (e.g. "reasoning_type").  Its children represent mutually exclusive
+    *attribute values* for that dimension (e.g. "deductive", "inductive").
+    """
+
+    depth: int
+    dimension: str | None = None
+    attribute_value: str | None = None
+    parent: TreeNode | None = field(default=None, repr=False)
+    children: list[TreeNode] = field(default_factory=list)
+    samples: list[str] = field(default_factory=list, repr=False)
+    excluded_dimensions: set[str] = field(default_factory=set)
+    is_infinite: bool = False
+    all_attributes: list[str] = field(default_factory=list)
+
+    @property
+    def path_constraints(self) -> list[dict[str, str]]:
+        """Collect dimension/attribute pairs from root to this node."""
+        constraints: list[dict[str, str]] = []
+        node: TreeNode | None = self
+        while node is not None:
+            if node.attribute_value and node.parent and node.parent.dimension:
+                constraints.append(
+                    {
+                        "dimension": node.parent.dimension,
+                        "attribute_value": node.attribute_value,
+                    }
+                )
+            node = node.parent
+        constraints.reverse()
+        return constraints
+
+    @property
+    def is_leaf(self) -> bool:
+        return len(self.children) == 0
+
+
+@dataclass
+class LeafTask:
+    """One generation unit: a leaf node + output parameters."""
+
+    leaf: TreeNode
+    num_samples: int
     task_type: str
     language: str
     difficulty: int
 
 
+# ---------------------------------------------------------------------------
+# Generator
+# ---------------------------------------------------------------------------
+
+
 @register_generator("topic_tree")
 class TopicTreeGenerator(BaseGenerator):
-    """Generates diverse instructions by building a topic taxonomy and sampling across it.
+    """Generates diverse instructions via TreeSynth spatial-partitioning tree.
 
-    Papers: TreeSynth (2025), Seed-Free SDG (2024)
+    Paper: TreeSynth (Wang et al., 2025) — arxiv.org/abs/2503.17195
+
+    Algorithm:
+    1. BFS tree construction — at each node, generate pivot samples, discover a
+       splitting dimension, expand its attribute values, create children.
+    2. Leaf generation — for each leaf, serialize the root-to-leaf path as
+       dimensional constraints and generate instructions that satisfy them all.
     """
 
     def __init__(
         self,
         domain: str = "general",
+        description: str | None = None,
         task_types: list[str] | None = None,
         languages: list[str] | None = None,
         difficulty_range: tuple[int, int] = (1, 5),
-        topic_depth: int = 2,
-        topic_breadth: int = 5,
-        generate_responses: bool = False,
+        max_depth: int = 4,
+        num_samples_per_node: int = 10,
+        max_attribute_count: int = 50,
         seed: int | None = None,
         prompt_overrides: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.domain = domain
+        self.description = description or ""
         self.task_types = task_types or ["qa", "explain", "compare", "creative"]
         self.languages = languages or ["en"]
         self.difficulty_range = difficulty_range
-        self.topic_depth = topic_depth
-        self.topic_breadth = topic_breadth
-        self.generate_responses = generate_responses
+        self.max_depth = max_depth
+        self.num_samples_per_node = num_samples_per_node
+        self.max_attribute_count = max_attribute_count
         self.seed = seed
         self.prompt_overrides = prompt_overrides
         self._rng = create_rng(seed)
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     async def generate(self, n: int) -> AsyncIterator[list[Sample]]:
-        """Build topic tree, plan distribution, generate instructions concurrently.
+        """Build spatial-partitioning tree, then generate from leaves.
 
-        Yields individual samples as they complete -- no chunking, no waiting
-        for all instructions to finish. The LLM semaphore controls concurrency.
+        Phase 1 — tree construction (no samples yielded).
+        Phase 2 — sliding-window generation over leaf tasks.
         """
-        # Step 1: Build topic tree
-        tree = await self._build_tree()
-        topics = tree.flatten()
-        if not topics:
-            logger.warning("Topic tree produced no topics, using domain as single topic")
-            topics = [self.domain]
+        # Phase 1: build tree
+        root = TreeNode(depth=0)
+        await self._build_tree(root)
+        leaves = _collect_leaves(root)
+        if not leaves:
+            logger.warning("Tree produced no leaves, using root as single leaf")
+            leaves = [root]
 
-        # Step 2: Plan distribution
-        plan = self._plan_distribution(topics, n)
+        logger.info(
+            "Tree built: %d leaves across %d depth levels",
+            len(leaves),
+            self.max_depth,
+        )
 
-        # Step 3: Generate instructions with a sliding window.
-        # Only max_concurrent tasks exist at any time so downstream pipeline
-        # tasks (response generation, filtering) can share the semaphore fairly.
-        async def generate_sample(entry: PlanEntry) -> list[Sample]:
-            instructions = await self._generate_one(entry)
-            return [
-                Sample(
-                    instruction=inst,
-                    domain=self.domain,
-                    topic=entry.topic,
-                    task_type=entry.task_type,
-                    language=entry.language,
-                    difficulty=entry.difficulty,
-                )
-                for inst in instructions
-            ]
+        # Phase 2: assign tasks and generate with sliding window
+        plan = self._assign_leaf_tasks(leaves, n)
+
+        async def run_task(task: LeafTask) -> list[Sample]:
+            try:
+                return await self._generate_leaf_samples(task)
+            except Exception as e:
+                logger.warning("Leaf generation failed: %s", e)
+                return []
 
         window = min(self.max_concurrent, len(plan))
         pending: set[asyncio.Task] = set()
         idx = 0
 
-        # Seed the window
         while idx < window:
-            pending.add(asyncio.create_task(generate_sample(plan[idx])))
+            pending.add(asyncio.create_task(run_task(plan[idx])))
             idx += 1
 
         while pending:
             done, pending = await asyncio.wait(
                 pending, return_when=asyncio.FIRST_COMPLETED
             )
-
-            # Refill: one replacement per completed task
             for _ in done:
                 if idx < len(plan):
-                    pending.add(asyncio.create_task(generate_sample(plan[idx])))
+                    pending.add(asyncio.create_task(run_task(plan[idx])))
                     idx += 1
-
-            # Yield completed samples immediately
             for task in done:
                 samples = task.result()
                 if samples:
                     yield samples
 
-    async def _generate_one(self, entry: PlanEntry) -> list[str]:
-        """Generate instructions for a single plan entry. Safe for parallel execution."""
-        try:
-            return await self._generate_instructions(entry)
-        except Exception as e:
-            logger.warning("Instruction generation failed for topic=%s: %s", entry.topic, e)
-            return []
+    # ------------------------------------------------------------------
+    # Tree construction (BFS)
+    # ------------------------------------------------------------------
 
-    async def _build_tree(self) -> TopicNode:
-        """Build a hierarchical topic tree via LLM. Retries on malformed JSON."""
+    async def _build_tree(self, root: TreeNode) -> None:
+        """Expand the tree level-by-level (BFS) up to max_depth."""
+        current_level = [root]
+        for depth in range(self.max_depth):
+            if not current_level:
+                break
+            logger.info(
+                "Expanding tree level %d (%d nodes)", depth, len(current_level)
+            )
+            results = await self._expand_level(current_level)
+            next_level: list[TreeNode] = []
+            for node, children in zip(current_level, results):
+                node.children = children
+                for child in children:
+                    child.parent = node
+                next_level.extend(children)
+            current_level = next_level
+
+    async def _expand_level(
+        self, nodes: list[TreeNode]
+    ) -> list[list[TreeNode]]:
+        """Expand all nodes at one BFS level using a sliding window."""
+        results: list[list[TreeNode]] = [[] for _ in nodes]
+
+        async def expand_one(index: int) -> tuple[int, list[TreeNode]]:
+            children = await self._expand_node(nodes[index])
+            return (index, children)
+
+        window = min(self.max_concurrent, len(nodes))
+        pending: set[asyncio.Task] = set()
+        idx = 0
+
+        while idx < window:
+            pending.add(asyncio.create_task(expand_one(idx)))
+            idx += 1
+
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            for _ in done:
+                if idx < len(nodes):
+                    pending.add(asyncio.create_task(expand_one(idx)))
+                    idx += 1
+            for task in done:
+                i, children = task.result()
+                results[i] = children
+
+        return results
+
+    async def _expand_node(self, node: TreeNode) -> list[TreeNode]:
+        """Run the TreeSynth per-node expansion: pivot → dimension → expand."""
+        # Step 1: generate pivot samples
+        pivot_samples = await self._generate_pivot_samples(node)
+        if not pivot_samples:
+            return []
+        node.samples = pivot_samples
+
+        # Step 2: discover splitting dimension
+        dim_result = await self._discover_dimension(node, pivot_samples)
+        if dim_result is None:
+            return []  # graceful degradation — node becomes leaf
+        dimension, attribute_map = dim_result
+        node.dimension = dimension
+
+        # Step 3: expand attribute values
+        initial_attrs = list(attribute_map.keys())
+        attributes = await self._expand_attributes(node, dimension, initial_attrs)
+
+        # Build children
+        new_excluded = node.excluded_dimensions | {dimension}
+        if len(attributes) > self.max_attribute_count:
+            # Infinite node: single child holding all attributes
+            child = TreeNode(
+                depth=node.depth + 1,
+                excluded_dimensions=new_excluded,
+                is_infinite=True,
+                all_attributes=attributes[: self.max_attribute_count],
+            )
+            return [child]
+
+        children: list[TreeNode] = []
+        for attr in attributes:
+            child = TreeNode(
+                depth=node.depth + 1,
+                attribute_value=attr,
+                excluded_dimensions=new_excluded,
+            )
+            children.append(child)
+        return children
+
+    # ------------------------------------------------------------------
+    # LLM interaction helpers
+    # ------------------------------------------------------------------
+
+    async def _generate_pivot_samples(self, node: TreeNode) -> list[str]:
+        """Generate diverse pivot samples for a node's subspace."""
         template = load_prompt("generators.topic_tree", self.prompt_overrides)
         prompt = render_template(
             template,
             domain=self.domain,
-            depth=self.topic_depth,
-            breadth=self.topic_breadth,
+            description=self.description,
+            subspace_description=self._subspace_description(node),
+            num_samples=self.num_samples_per_node,
         )
+        result = await self.llm.complete(
+            messages=[{"role": "user", "content": prompt}],
+            stage="topic_tree",
+        )
+        try:
+            parsed = _parse_json(result["content"])
+            if isinstance(parsed, list):
+                return [str(s) for s in parsed if s]
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Failed to parse pivot samples at depth %d", node.depth)
+        return []
 
-        max_attempts = 3
-        last_error: Exception | None = None
+    async def _discover_dimension(
+        self, node: TreeNode, pivot_samples: list[str]
+    ) -> tuple[str, dict[str, list[int]]] | None:
+        """Discover a splitting dimension from pivot samples. Up to 5 retries."""
+        template = load_prompt(
+            "generators.topic_tree_dimension", self.prompt_overrides
+        )
+        indexed_samples = "\n".join(
+            f"[{i}] {s}" for i, s in enumerate(pivot_samples)
+        )
+        excluded = ", ".join(sorted(node.excluded_dimensions)) or "none"
 
-        for attempt in range(max_attempts):
+        for attempt in range(5):
+            prompt = render_template(
+                template,
+                domain=self.domain,
+                description=self.description,
+                subspace_description=self._subspace_description(node),
+                indexed_samples=indexed_samples,
+                excluded_dimensions=excluded,
+            )
             result = await self.llm.complete(
                 messages=[{"role": "user", "content": prompt}],
                 stage="topic_tree",
             )
-
             try:
                 data = _parse_json(result["content"])
-                return _parse_tree(data)
+                dimension = str(data["dimension"])
+                attributes: dict[str, list[int]] = data["attributes"]
+
+                # Validation
+                if dimension in node.excluded_dimensions:
+                    logger.warning(
+                        "Dimension '%s' is excluded (attempt %d/5)", dimension, attempt + 1
+                    )
+                    continue
+                if not isinstance(attributes, dict) or len(attributes) < 2:
+                    logger.warning(
+                        "Need >=2 attributes, got %d (attempt %d/5)",
+                        len(attributes) if isinstance(attributes, dict) else 0,
+                        attempt + 1,
+                    )
+                    continue
+                # Mutual exclusivity check
+                all_indices: list[int] = []
+                for indices in attributes.values():
+                    if isinstance(indices, list):
+                        all_indices.extend(indices)
+                if len(all_indices) != len(set(all_indices)):
+                    logger.warning(
+                        "Non-exclusive attribute assignment (attempt %d/5)", attempt + 1
+                    )
+                    continue
+
+                return (dimension, attributes)
             except (json.JSONDecodeError, KeyError, TypeError) as e:
-                last_error = e
                 logger.warning(
-                    "Topic tree parse failed (attempt %d/%d): %s",
+                    "Dimension discovery parse failed (attempt %d/5): %s",
                     attempt + 1,
-                    max_attempts,
                     e,
                 )
 
-        raise MalformedResponseError(
-            f"Failed to parse topic tree after {max_attempts} attempts: {last_error}"
+        logger.info(
+            "Dimension discovery failed after 5 attempts at depth %d — node becomes leaf",
+            node.depth,
+        )
+        return None
+
+    async def _expand_attributes(
+        self,
+        node: TreeNode,
+        dimension: str,
+        initial_attrs: list[str],
+    ) -> list[str]:
+        """Iteratively expand attribute values until complete or max reached."""
+        attributes = list(initial_attrs)
+        template = load_prompt(
+            "generators.topic_tree_expand", self.prompt_overrides
         )
 
-    def _plan_distribution(self, topics: list[str], n: int) -> list[PlanEntry]:
-        """Allocate n samples across topic × task_type × language × difficulty."""
-        difficulties = list(range(self.difficulty_range[0], self.difficulty_range[1] + 1))
+        while len(attributes) < self.max_attribute_count:
+            prompt = render_template(
+                template,
+                domain=self.domain,
+                description=self.description,
+                subspace_description=self._subspace_description(node),
+                dimension=dimension,
+                existing_attributes=json.dumps(attributes),
+            )
+            result = await self.llm.complete(
+                messages=[{"role": "user", "content": prompt}],
+                stage="topic_tree",
+            )
+            content = result["content"].strip()
 
-        # Build all combinations
-        combos = []
-        for topic in topics:
+            # "null" means the list is already complete
+            if content.lower().strip('"') == "null":
+                break
+
+            try:
+                data = _parse_json(content)
+                if isinstance(data, dict):
+                    new_attrs = data.get("attributes", [])
+                    completeness = data.get("completeness", "complete")
+                elif isinstance(data, list):
+                    new_attrs = data
+                    completeness = "complete"
+                else:
+                    break
+
+                for attr in new_attrs:
+                    a = str(attr)
+                    if a not in attributes:
+                        attributes.append(a)
+
+                if completeness != "infinite":
+                    break
+            except (json.JSONDecodeError, TypeError):
+                break
+
+        return attributes
+
+    # ------------------------------------------------------------------
+    # Leaf generation
+    # ------------------------------------------------------------------
+
+    def _assign_leaf_tasks(
+        self, leaves: list[TreeNode], n: int
+    ) -> list[LeafTask]:
+        """Distribute n samples across leaves × task_type × language × difficulty."""
+        difficulties = list(
+            range(self.difficulty_range[0], self.difficulty_range[1] + 1)
+        )
+        combos: list[LeafTask] = []
+        for leaf in leaves:
             for task_type in self.task_types:
                 for lang in self.languages:
                     for diff in difficulties:
-                        combos.append(PlanEntry(topic, task_type, lang, diff))
+                        combos.append(
+                            LeafTask(
+                                leaf=leaf,
+                                num_samples=1,
+                                task_type=task_type,
+                                language=lang,
+                                difficulty=diff,
+                            )
+                        )
 
-        # Shuffle deterministically
         self._rng.shuffle(combos)
 
-        # Allocate samples to combos (round-robin)
-        plan = []
-        idx = 0
-        remaining = n
-        while remaining > 0:
-            plan.append(combos[idx % len(combos)])
-            idx += 1
-            remaining -= 1
-
+        # Round-robin allocate n tasks
+        plan: list[LeafTask] = []
+        for i in range(n):
+            plan.append(combos[i % len(combos)])
         return plan
 
-    async def _generate_instructions(self, entry: PlanEntry) -> list[str]:
-        """Generate instructions for a single plan entry."""
-        template = load_prompt("generators.topic_tree_instructions", self.prompt_overrides)
+    async def _generate_leaf_samples(self, task: LeafTask) -> list[Sample]:
+        """Generate instructions from a leaf node using path constraints."""
+        leaf = task.leaf
+        constraints = list(leaf.path_constraints)
+
+        # For infinite nodes, randomly pick one attribute
+        if leaf.is_infinite and leaf.all_attributes:
+            parent_dim = leaf.parent.dimension if leaf.parent else "variant"
+            chosen_attr = self._rng.choice(leaf.all_attributes)
+            constraints.append(
+                {"dimension": parent_dim, "attribute_value": chosen_attr}
+            )
+
+        # If no constraints at all (root is leaf), use domain as context
+        constraints_str = (
+            json.dumps(constraints, indent=2)
+            if constraints
+            else json.dumps(
+                [{"dimension": "domain", "attribute_value": self.domain}]
+            )
+        )
+
+        template = load_prompt(
+            "generators.topic_tree_instructions", self.prompt_overrides
+        )
         prompt = render_template(
             template,
             domain=self.domain,
-            topic=entry.topic,
-            task_type=entry.task_type,
-            difficulty=entry.difficulty,
-            language=entry.language,
-            n=1,
+            description=self.description,
+            constraints_json=constraints_str,
+            task_type=task.task_type,
+            language=task.language,
+            difficulty=task.difficulty,
+            num_samples=task.num_samples,
         )
 
         result = await self.llm.complete(
@@ -227,15 +500,65 @@ class TopicTreeGenerator(BaseGenerator):
 
         try:
             instructions = _parse_json(result["content"])
-            if isinstance(instructions, list):
-                return [str(i) for i in instructions if i]
-            return [str(instructions)]
+            if not isinstance(instructions, list):
+                instructions = [instructions]
         except (json.JSONDecodeError, TypeError):
-            # Fall back to treating the whole response as a single instruction
             content = result["content"].strip()
-            if content:
-                return [content]
-            return []
+            instructions = [content] if content else []
+
+        topic_str = (
+            " > ".join(
+                c["attribute_value"]
+                for c in constraints
+                if c.get("attribute_value")
+            )
+            or self.domain
+        )
+
+        return [
+            Sample(
+                instruction=str(inst),
+                domain=self.domain,
+                topic=topic_str,
+                task_type=task.task_type,
+                language=task.language,
+                difficulty=task.difficulty,
+            )
+            for inst in instructions
+            if inst
+        ]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _subspace_description(self, node: TreeNode) -> str:
+        """Human-readable description of a node's subspace."""
+        constraints = node.path_constraints
+        if not constraints:
+            return f"The entire domain of '{self.domain}'"
+        parts = [
+            f"{c['dimension']}={c['attribute_value']}" for c in constraints
+        ]
+        return f"Domain '{self.domain}' where {', '.join(parts)}"
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _collect_leaves(root: TreeNode) -> list[TreeNode]:
+    """BFS collection of all leaf nodes."""
+    leaves: list[TreeNode] = []
+    queue = [root]
+    while queue:
+        node = queue.pop(0)
+        if node.is_leaf:
+            leaves.append(node)
+        else:
+            queue.extend(node.children)
+    return leaves
 
 
 def _parse_json(text: str) -> Any:
@@ -262,7 +585,6 @@ def _parse_json(text: str) -> Any:
         start = text.find(start_char)
         if start == -1:
             continue
-        # Find the last matching bracket
         end = text.rfind(end_char)
         if end > start:
             try:
@@ -279,43 +601,20 @@ def _parse_json(text: str) -> Any:
             if repaired is not None:
                 return repaired
 
-    # Give up -- raise the original error
+    # Give up — raise the original error
     return json.loads(text)
 
 
 def _repair_json(text: str) -> Any | None:
     """Try to repair truncated JSON by closing open brackets/braces."""
-    # Count open vs close brackets
-    opens = {"[": 0, "{": 0}
     closes = {"]": "[", "}": "{"}
 
-    for char in text:
-        if char in opens:
-            opens[char] += 1
-        elif char in closes:
-            opens[closes[char]] = max(0, opens[closes[char]] - 1)
-
-    # Truncate at the last valid comma or complete value, then close brackets
-    # Try progressively shorter substrings
     for trim in range(0, min(200, len(text)), 10):
         candidate = text[: len(text) - trim] if trim else text
-        # Remove trailing partial content after last comma
         last_comma = candidate.rfind(",")
         if last_comma > 0 and trim > 0:
             candidate = candidate[:last_comma]
-        # Close any open brackets
-        suffix = ""
-        for char in reversed(candidate):
-            if char == "{":
-                suffix += "}"
-            elif char == "[":
-                suffix += "]"
-            elif char == "}":
-                suffix = suffix[:-1] if suffix.endswith("}") else suffix
-            elif char == "]":
-                suffix = suffix[:-1] if suffix.endswith("]") else suffix
 
-        # Recount what's needed
         o = {"[": 0, "{": 0}
         for c in candidate:
             if c in o:
@@ -331,27 +630,3 @@ def _repair_json(text: str) -> Any | None:
             continue
 
     return None
-
-
-def _parse_tree(data: dict | list) -> TopicNode:
-    """Parse a JSON dict or list into a TopicNode tree.
-
-    Handles both {"topics": [...]} and bare [...] (from truncated JSON repair).
-    """
-    topics_data = data if isinstance(data, list) else data.get("topics", [])
-    root = TopicNode(name="root", subtopics=[])
-    for t in topics_data:
-        if isinstance(t, dict):
-            root.subtopics.append(_parse_node(t))
-    return root
-
-
-def _parse_node(data: dict) -> TopicNode:
-    """Recursively parse a topic node."""
-    node = TopicNode(
-        name=data.get("name", "unknown"),
-        description=data.get("description", ""),
-    )
-    for sub in data.get("subtopics", []):
-        node.subtopics.append(_parse_node(sub))
-    return node

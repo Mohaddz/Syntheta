@@ -132,13 +132,16 @@ def _run_pipeline(config: dict, resume: bool) -> None:
     prompt_overrides = config.get("prompts", {})
 
     if method == "topic_tree":
+        tt_cfg = config.get("topic_tree", {})
         generator = TopicTreeGenerator(
             domain=config["domain"],
+            description=config.get("description"),
             task_types=config.get("task_types"),
             languages=config.get("languages"),
             difficulty_range=tuple(difficulty),
-            topic_depth=config.get("topic_tree", {}).get("depth", 2),
-            topic_breadth=config.get("topic_tree", {}).get("breadth", 5),
+            max_depth=tt_cfg.get("max_depth", 4),
+            num_samples_per_node=tt_cfg.get("num_samples_per_node", 10),
+            max_attribute_count=tt_cfg.get("max_attribute_count", 50),
             seed=config.get("seed"),
             prompt_overrides=prompt_overrides,
             llm=llm,

@@ -4,8 +4,9 @@ method: topic_tree
 n: 1000
 
 topic_tree:
-  depth: 2
-  breadth: 5
+  max_depth: 4
+  num_samples_per_node: 10
+  max_attribute_count: 50
 
 evolve:
   enabled: false

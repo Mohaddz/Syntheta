@@ -1,0 +1,20 @@
+You are expanding the set of attribute values for a dimension in a data taxonomy.
+
+Domain: {{domain}}
+{{description}}
+Current subspace: {{subspace_description}}
+Dimension: {{dimension}}
+Existing attribute values: {{existing_attributes}}
+
+Are there additional attribute values for this dimension that are not yet listed? Consider the full scope of the domain and subspace.
+
+Respond with ONLY one of the following (no markdown, no explanation):
+
+1. If the existing list already covers all possible values:
+null
+
+2. If there are additional values and the total set is finite:
+{"attributes": ["new_value_1", "new_value_2"], "completeness": "complete"}
+
+3. If the dimension has essentially infinite possible values (provide up to 10 more):
+{"attributes": ["new_value_1", "new_value_2", "new_value_3"], "completeness": "infinite"}

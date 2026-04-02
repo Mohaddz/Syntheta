@@ -32,7 +32,7 @@ class TestLoadPrompt:
     def test_load_builtin_template(self):
         template = load_prompt("generators.topic_tree")
         assert "{{domain}}" in template
-        assert "{{breadth}}" in template
+        assert "{{num_samples}}" in template
 
     def test_load_response_generator(self):
         template = load_prompt("transformers.response_generator")

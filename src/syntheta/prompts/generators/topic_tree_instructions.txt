@@ -1,19 +1,22 @@
 You are generating diverse, high-quality instructions for training data.
 
 Domain: {{domain}}
-Topic: {{topic}}
+{{description}}
 Task type: {{task_type}}
 Difficulty level: {{difficulty}} (1=basic, 5=expert)
 Language: {{language}}
 
-Generate {{n}} unique {{task_type}} instructions about "{{topic}}" at difficulty level {{difficulty}}.
+Each instruction MUST satisfy ALL of the following dimensional constraints:
+{{constraints_json}}
+
+Generate {{num_samples}} unique {{task_type}} instructions at difficulty level {{difficulty}}.
 
 Requirements:
-- Each instruction should be self-contained and clear
+- Each instruction must be self-contained and clear
 - Instructions should be diverse — do not repeat the same question pattern
 - Match the specified difficulty level
 - Write in {{language}}
-- Focus specifically on the topic "{{topic}}" within the domain "{{domain}}"
+- Every instruction must satisfy every constraint listed above
 
 Output ONLY a valid JSON array of strings (no markdown, no explanation):
 ["instruction 1", "instruction 2", ...]
