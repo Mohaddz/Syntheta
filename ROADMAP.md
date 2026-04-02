@@ -32,7 +32,7 @@
 
 Audit every generator, transformer, and filter against the source papers. The current implementations were built to match the paper abstracts and high-level descriptions. A line-by-line comparison with the actual methodology sections is needed to ensure correctness and completeness.
 
-- [ ] **TopicTreeGenerator** — compare against TreeSynth (2025) and Seed-Free SDG (2024). Verify: tree construction prompt design, diversity of topic sampling strategy, plan distribution balancing, instruction generation prompt faithfulness.
+- [x] **TopicTreeGenerator** — compare against TreeSynth (2025) and Seed-Free SDG (2024). Verify: tree construction prompt design, diversity of topic sampling strategy, plan distribution balancing, instruction generation prompt faithfulness.
 - [ ] **PersonaGenerator** — compare against "Scaling Synthetic Data with 1B Personas" (2024) and MATRIX-Gen (ACL 2025). Verify: persona attribute diversity (demographics, expertise, perspective), question generation grounding in persona context, deduplication across personas.
 - [ ] **SeedDatasetGenerator** — compare against Self-Instruct (Wang et al., 2023). Verify: few-shot pool construction, similarity filtering against seed pool (currently missing?), iterative pool expansion, classification vs generation task split.
 - [ ] **EvolInstruct** — compare against WizardLM (Xu et al., 2023) and WizardLM2. Verify: all 6 strategy prompts match paper descriptions, elimination criteria (too short, copy-paste, "sorry" responses), multi-round evolution chain integrity.

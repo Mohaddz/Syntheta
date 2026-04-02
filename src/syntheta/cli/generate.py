@@ -147,8 +147,17 @@ def _run_pipeline(config: dict, resume: bool) -> None:
             llm=llm,
         )
     elif method == "persona":
+        p_cfg = config.get("persona", {})
+        source = p_cfg.get("source")
+        if not source:
+            click.echo("Error: persona method requires 'persona.source' config", err=True)
+            raise SystemExit(1)
         generator = PersonaGenerator(
-            domain=config["domain"],
+            source=source,
+            text_field=p_cfg.get("text_field", "text"),
+            max_personas=p_cfg.get("max_personas", 500),
+            expansion_rounds=p_cfg.get("expansion_rounds", 6),
+            dedup_threshold=p_cfg.get("dedup_threshold", 0.9),
             languages=config.get("languages"),
             seed=config.get("seed"),
             prompt_overrides=prompt_overrides,

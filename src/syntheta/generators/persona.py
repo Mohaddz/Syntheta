@@ -1,170 +1,425 @@
-"""PersonaGenerator: generates diverse instructions from synthetic personas."""
+"""PersonaGenerator: extract personas from a text corpus for diverse instruction synthesis.
+
+Implements the Persona Hub methodology (Chan et al., 2024 — arxiv.org/abs/2406.20094).
+Pipeline: text-to-persona extraction → persona-to-persona expansion → dedup → synthesis.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import json
+import hashlib
 import logging
+import math
+import struct
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
-from syntheta.generators.topic_tree import _parse_json
 from syntheta.pipeline.base import BaseGenerator
 from syntheta.pipeline.registry import register_generator
 from syntheta.prompts import load_prompt, render_template
 from syntheta.schema.sample import Sample
+from syntheta.utils.jsonl import read_jsonl
 from syntheta.utils.seeding import create_rng
 
 logger = logging.getLogger("syntheta.generators.persona")
 
+# ---------------------------------------------------------------------------
+# MinHash helpers (pure Python, no external deps)
+# ---------------------------------------------------------------------------
+
+_NUM_HASHES = 128
+_SHINGLE_K = 3
+_SEEDS = [i.to_bytes(4, "big") for i in range(_NUM_HASHES)]
+
+
+def _shingles(text: str) -> set[str]:
+    """Character 3-gram shingles."""
+    t = text.lower().strip()
+    if len(t) < _SHINGLE_K:
+        return {t}
+    return {t[i : i + _SHINGLE_K] for i in range(len(t) - _SHINGLE_K + 1)}
+
+
+def _minhash_signature(shingle_set: set[str]) -> list[int]:
+    """Compute MinHash signature of length _NUM_HASHES."""
+    sig = [2**64] * _NUM_HASHES
+    for shingle in shingle_set:
+        shingle_bytes = shingle.encode("utf-8")
+        for i, seed in enumerate(_SEEDS):
+            h = struct.unpack("<Q", hashlib.sha256(seed + shingle_bytes).digest()[:8])[0]
+            if h < sig[i]:
+                sig[i] = h
+    return sig
+
+
+def _jaccard_estimate(sig_a: list[int], sig_b: list[int]) -> float:
+    """Estimate Jaccard similarity from two MinHash signatures."""
+    return sum(a == b for a, b in zip(sig_a, sig_b)) / len(sig_a)
+
+
+def _minhash_dedup(personas: list[str], threshold: float = 0.8) -> list[str]:
+    """Remove near-duplicate personas via MinHash."""
+    kept_sigs: list[list[int]] = []
+    kept: list[str] = []
+    for persona in personas:
+        sig = _minhash_signature(_shingles(persona))
+        if any(_jaccard_estimate(sig, ks) > threshold for ks in kept_sigs):
+            continue
+        kept_sigs.append(sig)
+        kept.append(persona)
+    return kept
+
+
+# ---------------------------------------------------------------------------
+# Embedding dedup helpers
+# ---------------------------------------------------------------------------
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+# ---------------------------------------------------------------------------
+# Generator
+# ---------------------------------------------------------------------------
+
 
 @register_generator("persona")
 class PersonaGenerator(BaseGenerator):
-    """Generates instructions by creating diverse personas and asking them domain questions.
+    """Generates instructions by extracting personas from a text corpus.
 
-    Papers: Scaling Synthetic Data with 1B Personas (2024), MATRIX-Gen (ACL 2025)
+    Paper: Persona Hub (Chan et al., 2024) — arxiv.org/abs/2406.20094
+
+    Pipeline:
+    1. Text-to-Persona — extract persona descriptions from corpus documents
+    2. Persona-to-Persona — expand via relationship hops
+    3. Deduplicate — MinHash + embedding similarity
+    4. Synthesize — generate instructions from each persona's perspective
     """
 
     def __init__(
         self,
-        domain: str = "general",
-        n_personas: int = 10,
-        questions_per_persona: int = 5,
-        persona_seed_traits: list[str] | None = None,
+        source: str,
+        text_field: str = "text",
+        max_personas: int = 500,
+        expansion_rounds: int = 6,
+        dedup_threshold: float = 0.9,
         languages: list[str] | None = None,
-        generate_responses: bool = False,
         seed: int | None = None,
         prompt_overrides: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
-        self.domain = domain
-        self.n_personas = n_personas
-        self.questions_per_persona = questions_per_persona
-        self.persona_seed_traits = persona_seed_traits or []
+        self.source = source
+        self.text_field = text_field
+        self.max_personas = max_personas
+        self.expansion_rounds = expansion_rounds
+        self.dedup_threshold = dedup_threshold
         self.languages = languages or ["en"]
-        self.generate_responses = generate_responses
         self.seed = seed
         self.prompt_overrides = prompt_overrides
         self._rng = create_rng(seed)
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     async def generate(self, n: int) -> AsyncIterator[list[Sample]]:
-        """Generate personas, then generate questions from each persona's perspective."""
-        # Step 1: Generate personas
-        personas = await self._generate_personas()
+        """Extract personas from corpus, expand, dedup, then synthesize instructions."""
+        # Phase 1: Extract
+        raw_personas = await self._extract_personas()
+        if not raw_personas:
+            logger.error("No personas extracted from corpus — cannot generate")
+            return
 
-        # Step 2: Build all (persona, language) pairs
-        pairs = []
-        for persona in personas:
-            for lang in self.languages:
-                pairs.append((persona, lang))
+        # Phase 2: Expand
+        expanded = await self._expand_personas(raw_personas)
 
-        # Step 3: Fire all question tasks, yield each as it completes
-        async def generate_questions(persona: dict, lang: str) -> list[Sample]:
-            questions = await self._generate_questions_safe(persona, lang)
-            return [
-                Sample(
-                    instruction=q,
-                    domain=self.domain,
-                    persona=(
-                        f"{persona.get('name', 'unknown')}: "
-                        f"{persona.get('background', '')}"
-                    ),
-                    language=lang,
+        # Phase 3: Deduplicate
+        deduped = await self._deduplicate(expanded)
+        logger.info(
+            "Persona pool: %d extracted, %d after expansion, %d after dedup",
+            len(raw_personas),
+            len(expanded),
+            len(deduped),
+        )
+
+        if not deduped:
+            logger.error("All personas removed during dedup — cannot generate")
+            return
+
+        # Phase 4: Synthesize
+        async for batch in self._synthesize(deduped, n):
+            yield batch
+
+    # ------------------------------------------------------------------
+    # Phase 1: Corpus loading + persona extraction
+    # ------------------------------------------------------------------
+
+    def _load_corpus(self) -> list[str]:
+        """Load text documents from corpus file."""
+        path = Path(self.source)
+        if not path.exists():
+            raise FileNotFoundError(f"Corpus file not found: {self.source}")
+
+        documents: list[str] = []
+        suffix = path.suffix.lower()
+
+        if suffix == ".jsonl":
+            for record in read_jsonl(str(path)):
+                text = record.get(self.text_field)
+                if text and isinstance(text, str) and text.strip():
+                    documents.append(text.strip())
+                else:
+                    logger.warning("Skipping record missing '%s' field", self.text_field)
+        elif suffix == ".txt":
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        documents.append(line)
+        else:
+            raise ValueError(f"Unsupported corpus format '{suffix}'. Use .jsonl or .txt")
+
+        if not documents:
+            raise ValueError(f"Corpus file '{self.source}' contains no valid documents")
+
+        # Sample down to max_personas if corpus is larger
+        if len(documents) > self.max_personas:
+            documents = self._rng.sample(documents, self.max_personas)
+            logger.info("Sampled %d documents from corpus", self.max_personas)
+        else:
+            logger.info("Loaded %d documents from corpus", len(documents))
+
+        return documents
+
+    async def _extract_personas(self) -> list[str]:
+        """Extract one persona per document via LLM."""
+        documents = self._load_corpus()
+        template = load_prompt("generators.persona", self.prompt_overrides)
+
+        personas: list[str] = []
+
+        async def extract_one(doc: str) -> str | None:
+            prompt = render_template(template, text=doc)
+            try:
+                result = await self.llm.complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    stage="persona_extraction",
                 )
-                for q in questions
-            ]
+                text = result["content"].strip()
+                return text if text else None
+            except Exception as e:
+                logger.warning("Persona extraction failed: %s", e)
+                return None
 
-        # Sliding window: only max_concurrent tasks in flight at once
-        window = min(self.max_concurrent, len(pairs))
+        # Sliding window
+        window = min(self.max_concurrent, len(documents))
         pending: set[asyncio.Task] = set()
-        pair_idx = 0
-        total = 0
+        idx = 0
 
-        # Seed the window
-        while pair_idx < window:
-            p, lang = pairs[pair_idx]
-            pending.add(asyncio.create_task(generate_questions(p, lang)))
-            pair_idx += 1
+        while idx < window:
+            pending.add(asyncio.create_task(extract_one(documents[idx])))
+            idx += 1
 
         while pending:
-            done, pending = await asyncio.wait(
-                pending, return_when=asyncio.FIRST_COMPLETED
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for _ in done:
+                if idx < len(documents):
+                    pending.add(asyncio.create_task(extract_one(documents[idx])))
+                    idx += 1
+            for task in done:
+                persona = task.result()
+                if persona:
+                    personas.append(persona)
+
+        return personas
+
+    # ------------------------------------------------------------------
+    # Phase 2: Persona-to-Persona expansion
+    # ------------------------------------------------------------------
+
+    async def _expand_personas(self, seed_personas: list[str]) -> list[str]:
+        """Expand persona pool via relationship hops."""
+        all_personas = list(seed_personas)
+        current_round = list(seed_personas)
+        template = load_prompt("generators.persona_expand", self.prompt_overrides)
+        pool_cap = self.max_personas * 10
+
+        async def expand_one(persona: str) -> str | None:
+            prompt = render_template(template, persona=persona)
+            try:
+                result = await self.llm.complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    stage="persona_expansion",
+                )
+                text = result["content"].strip()
+                return text if text else None
+            except Exception as e:
+                logger.warning("Persona expansion failed: %s", e)
+                return None
+
+        for round_num in range(1, self.expansion_rounds + 1):
+            if len(all_personas) >= pool_cap:
+                logger.info("Persona pool cap reached (%d), stopping expansion", pool_cap)
+                break
+
+            new_personas: list[str] = []
+
+            # Sliding window over current round's personas
+            window = min(self.max_concurrent, len(current_round))
+            pending: set[asyncio.Task] = set()
+            idx = 0
+
+            while idx < window:
+                pending.add(asyncio.create_task(expand_one(current_round[idx])))
+                idx += 1
+
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for _ in done:
+                    if idx < len(current_round):
+                        pending.add(asyncio.create_task(expand_one(current_round[idx])))
+                        idx += 1
+                for task in done:
+                    persona = task.result()
+                    if persona:
+                        new_personas.append(persona)
+
+            all_personas.extend(new_personas)
+            current_round = new_personas
+            logger.info(
+                "Expansion round %d: +%d personas (total: %d)",
+                round_num,
+                len(new_personas),
+                len(all_personas),
             )
+
+            if not new_personas:
+                logger.info("No new personas in round %d, stopping expansion", round_num)
+                break
+
+        return all_personas
+
+    # ------------------------------------------------------------------
+    # Phase 3: Deduplication
+    # ------------------------------------------------------------------
+
+    async def _deduplicate(self, personas: list[str]) -> list[str]:
+        """Two-stage dedup: MinHash (near-exact) then embedding (semantic)."""
+        # Stage A: MinHash
+        after_minhash = _minhash_dedup(personas, threshold=self.dedup_threshold)
+        logger.info("MinHash dedup: %d → %d personas", len(personas), len(after_minhash))
+
+        # Stage B: Embedding dedup
+        after_embed = await self._embedding_dedup(after_minhash)
+        return after_embed
+
+    async def _embedding_dedup(self, personas: list[str]) -> list[str]:
+        """Remove semantically similar personas via embedding cosine similarity."""
+        if not hasattr(self.llm, "embed"):
+            logger.warning("LLM client has no embed() method, skipping embedding dedup")
+            return personas
+
+        try:
+            # Batch embeddings in chunks of 100
+            embeddings: list[list[float]] = []
+            batch_size = 100
+            for i in range(0, len(personas), batch_size):
+                chunk = personas[i : i + batch_size]
+                chunk_embeddings = await self.llm.embed(chunk, stage="persona_dedup")
+                embeddings.extend(chunk_embeddings)
+        except Exception as e:
+            logger.warning("Embedding dedup failed (%s), skipping", e)
+            return personas
+
+        # Greedy dedup: keep persona if not too similar to any already kept
+        kept_indices: list[int] = []
+        kept_embeddings: list[list[float]] = []
+
+        for i, emb in enumerate(embeddings):
+            is_dup = any(
+                _cosine_similarity(emb, ke) > self.dedup_threshold for ke in kept_embeddings
+            )
+            if not is_dup:
+                kept_indices.append(i)
+                kept_embeddings.append(emb)
+
+        result = [personas[i] for i in kept_indices]
+        logger.info("Embedding dedup: %d → %d personas", len(personas), len(result))
+        return result
+
+    # ------------------------------------------------------------------
+    # Phase 4: Instruction synthesis
+    # ------------------------------------------------------------------
+
+    async def _synthesize(self, personas: list[str], n: int) -> AsyncIterator[list[Sample]]:
+        """Generate instructions from personas via round-robin assignment."""
+        template = load_prompt("generators.persona_questions", self.prompt_overrides)
+
+        # Build (persona, language) pairs round-robin
+        pairs: list[tuple[str, str]] = []
+        for i in range(n):
+            persona = personas[i % len(personas)]
+            language = self.languages[i % len(self.languages)]
+            pairs.append((persona, language))
+
+        async def synthesize_one(persona: str, language: str) -> Sample | None:
+            prompt = render_template(template, persona=persona, language=language)
+            try:
+                result = await self.llm.complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    stage="persona_synthesis",
+                )
+                instruction = result["content"].strip()
+                if not instruction:
+                    return None
+                return Sample(instruction=instruction, persona=persona, language=language)
+            except Exception as e:
+                logger.warning("Instruction synthesis failed: %s", e)
+                return None
+
+        # Build task list
+        assignments = pairs
+
+        # Sliding window
+        window = min(self.max_concurrent, len(assignments))
+        pending: set[asyncio.Task] = set()
+        idx = 0
+        total = 0
+
+        while idx < window:
+            pending.add(asyncio.create_task(synthesize_one(*assignments[idx])))
+            idx += 1
+
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
 
             # Refill
             for _ in done:
-                if pair_idx < len(pairs):
-                    p, lang = pairs[pair_idx]
-                    pending.add(asyncio.create_task(generate_questions(p, lang)))
-                    pair_idx += 1
+                if idx < len(assignments) and total < n:
+                    pending.add(asyncio.create_task(synthesize_one(*assignments[idx])))
+                    idx += 1
 
+            batch: list[Sample] = []
             for task in done:
-                samples = task.result()
-                if samples and total < n:
-                    remaining_n = n - total
-                    if len(samples) > remaining_n:
-                        samples = samples[:remaining_n]
-                    total += len(samples)
-                    yield samples
+                sample = task.result()
+                if sample and total < n:
+                    batch.append(sample)
+                    total += 1
 
-                if total >= n:
-                    for t in pending:
-                        t.cancel()
-                    pending.clear()
-                    return
+            if batch:
+                yield batch
 
-    async def _generate_questions_safe(self, persona: dict, language: str) -> list[str]:
-        """Wrapper with error handling for parallel execution."""
-        try:
-            return await self._generate_questions(persona, language)
-        except Exception as e:
-            logger.warning("Question generation failed for persona=%s: %s", persona.get("name"), e)
-            return []
-
-    async def _generate_personas(self) -> list[dict]:
-        """Generate diverse synthetic personas via LLM."""
-        template = load_prompt("generators.persona", self.prompt_overrides)
-        prompt = render_template(template, domain=self.domain, n=self.n_personas)
-
-        result = await self.llm.complete(
-            messages=[{"role": "user", "content": prompt}],
-            stage="persona_generation",
-        )
-
-        try:
-            personas = _parse_json(result["content"])
-            if isinstance(personas, list):
-                return personas
-            return [personas]
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("Could not parse personas, using default")
-            return [
-                {"name": "General User", "background": "curious person", "perspective": "general"}
-            ]
-
-    async def _generate_questions(self, persona: dict, language: str) -> list[str]:
-        """Generate questions from a persona's perspective."""
-        template = load_prompt("generators.persona_questions", self.prompt_overrides)
-        prompt = render_template(
-            template,
-            persona_name=persona.get("name", "User"),
-            persona_background=persona.get("background", "a curious person"),
-            domain=self.domain,
-            n=self.questions_per_persona,
-            language=language,
-        )
-
-        result = await self.llm.complete(
-            messages=[{"role": "user", "content": prompt}],
-            stage="persona_generation",
-        )
-
-        try:
-            questions = _parse_json(result["content"])
-            if isinstance(questions, list):
-                return [str(q) for q in questions if q]
-            return [str(questions)]
-        except (json.JSONDecodeError, TypeError):
-            content = result["content"].strip()
-            return [content] if content else []
+            if total >= n:
+                for t in pending:
+                    t.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                return

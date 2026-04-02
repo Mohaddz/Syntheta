@@ -1,0 +1,10 @@
+Given the following persona, describe a different person who interacts with them in daily life. This could be someone they teach, serve, supervise, live with, or encounter — not just a professional peer.
+
+Vary the expertise level: include beginners, students, patients, customers, family members, or members of the general public when appropriate.
+
+Respond with exactly one sentence, no more than 30 words. Do not include a name.
+
+Original persona:
+{{persona}}
+
+Related persona description:

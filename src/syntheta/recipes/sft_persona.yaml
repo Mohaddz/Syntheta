@@ -1,7 +1,16 @@
 config_version: "0.1"
 task: generate
 method: persona
-n: 1000
+n: 5000
+
+persona:
+  source: "corpus.jsonl"
+  max_personas: 500
+  expansion_rounds: 6
+  dedup_threshold: 0.9
+
+llm:
+  embedding_model: "text-embedding-3-small"
 
 responses:
   enabled: true
