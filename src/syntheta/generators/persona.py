@@ -43,7 +43,7 @@ def _shingles(text: str) -> set[str]:
 
 def _minhash_signature(shingle_set: set[str]) -> list[int]:
     """Compute MinHash signature of length _NUM_HASHES."""
-    sig = [float("inf")] * _NUM_HASHES
+    sig = [2**64] * _NUM_HASHES
     for shingle in shingle_set:
         shingle_bytes = shingle.encode("utf-8")
         for i, seed in enumerate(_SEEDS):
@@ -412,5 +412,5 @@ class PersonaGenerator(BaseGenerator):
             if total >= n:
                 for t in pending:
                     t.cancel()
-                pending.clear()
+                await asyncio.gather(*pending, return_exceptions=True)
                 return

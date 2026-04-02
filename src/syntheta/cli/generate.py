@@ -148,7 +148,7 @@ def _run_pipeline(config: dict, resume: bool) -> None:
         )
     elif method == "persona":
         p_cfg = config.get("persona", {})
-        source = p_cfg.get("source") or config.get("source")
+        source = p_cfg.get("source")
         if not source:
             click.echo("Error: persona method requires 'persona.source' config", err=True)
             raise SystemExit(1)

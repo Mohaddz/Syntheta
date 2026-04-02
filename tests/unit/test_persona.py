@@ -212,6 +212,24 @@ class TestExpandPersonas:
         # 1 seed + 1 from round 1 + 1 from round 2
         assert len(result) == 3
 
+    @pytest.mark.asyncio
+    async def test_expand_stops_when_no_new_personas(self):
+        llm = MagicMock()
+        llm.complete = AsyncMock(
+            side_effect=[
+                {"content": "A related persona"},
+                {"content": ""},  # empty — round 2 produces nothing
+            ]
+        )
+        llm.rate_limiter = MagicMock()
+        llm.rate_limiter.max_concurrent = 10
+
+        gen = PersonaGenerator(source="dummy.jsonl", expansion_rounds=4, llm=llm)
+        result = await gen._expand_personas(["A seed persona"])
+        # 1 seed + 1 from round 1, round 2 yields empty → stops early
+        assert len(result) == 2
+        assert llm.complete.call_count == 2  # didn't attempt rounds 3-4
+
 
 # ---------------------------------------------------------------------------
 # Embedding dedup tests
