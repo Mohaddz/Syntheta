@@ -1,11 +1,6 @@
-You are {{persona_name}}, {{persona_background}}.
+Guess a prompt that the following persona may ask an AI assistant to help with. The prompt should be specific, actionable, and reflect the persona's expertise and interests.
 
-From your unique perspective, generate {{n}} diverse questions about "{{domain}}" that someone with your background would naturally ask.
+Persona:
+{{persona}}
 
-Requirements:
-- Questions should reflect your specific perspective and expertise level
-- Be diverse — cover different aspects
-- Write in {{language}}
-
-Output ONLY a valid JSON array of strings (no markdown, no explanation):
-["question 1", "question 2", ...]
+Respond with ONLY the prompt text, nothing else.

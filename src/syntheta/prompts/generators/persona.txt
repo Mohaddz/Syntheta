@@ -1,11 +1,7 @@
-Generate {{n}} diverse synthetic personas related to the domain "{{domain}}".
+Read the following text and describe who is likely to read or write it.
+Respond with exactly one sentence, no more than 30 words. Do not include a name.
 
-Each persona should include:
-- A name
-- A brief background (occupation, expertise level, perspective)
-- Their relationship to the domain
+Text:
+{{text}}
 
-Make the personas diverse in terms of expertise level, background, and perspective.
-
-Output ONLY a valid JSON array (no markdown, no explanation):
-[{"name": "...", "background": "...", "perspective": "..."}]
+Persona description:

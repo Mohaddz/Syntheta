@@ -17,6 +17,13 @@ DEFAULTS = {
         "num_samples_per_node": 10,
         "max_attribute_count": 50,
     },
+    "persona": {
+        "source": None,
+        "text_field": "text",
+        "max_personas": 500,
+        "expansion_rounds": 6,
+        "dedup_threshold": 0.9,
+    },
     "evolve": {
         "enabled": False,
         "rounds": 1,
