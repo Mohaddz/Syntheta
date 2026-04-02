@@ -158,6 +158,7 @@ def _run_pipeline(config: dict, resume: bool) -> None:
             max_personas=p_cfg.get("max_personas", 500),
             expansion_rounds=p_cfg.get("expansion_rounds", 6),
             dedup_threshold=p_cfg.get("dedup_threshold", 0.9),
+            languages=config.get("languages"),
             seed=config.get("seed"),
             prompt_overrides=prompt_overrides,
             llm=llm,

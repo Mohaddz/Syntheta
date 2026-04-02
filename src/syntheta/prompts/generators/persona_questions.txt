@@ -1,5 +1,7 @@
 Guess a prompt that the following persona may ask an AI assistant to help with. The prompt should be specific, actionable, and reflect the persona's expertise and interests.
 
+Write the prompt in {{language}}.
+
 Persona:
 {{persona}}
 

@@ -111,6 +111,7 @@ class PersonaGenerator(BaseGenerator):
         max_personas: int = 500,
         expansion_rounds: int = 6,
         dedup_threshold: float = 0.9,
+        languages: list[str] | None = None,
         seed: int | None = None,
         prompt_overrides: dict[str, str] | None = None,
         **kwargs: Any,
@@ -121,6 +122,7 @@ class PersonaGenerator(BaseGenerator):
         self.max_personas = max_personas
         self.expansion_rounds = expansion_rounds
         self.dedup_threshold = dedup_threshold
+        self.languages = languages or ["en"]
         self.seed = seed
         self.prompt_overrides = prompt_overrides
         self._rng = create_rng(seed)
@@ -313,7 +315,7 @@ class PersonaGenerator(BaseGenerator):
     async def _deduplicate(self, personas: list[str]) -> list[str]:
         """Two-stage dedup: MinHash (near-exact) then embedding (semantic)."""
         # Stage A: MinHash
-        after_minhash = _minhash_dedup(personas, threshold=0.8)
+        after_minhash = _minhash_dedup(personas, threshold=self.dedup_threshold)
         logger.info("MinHash dedup: %d → %d personas", len(personas), len(after_minhash))
 
         # Stage B: Embedding dedup
@@ -362,8 +364,15 @@ class PersonaGenerator(BaseGenerator):
         """Generate instructions from personas via round-robin assignment."""
         template = load_prompt("generators.persona_questions", self.prompt_overrides)
 
-        async def synthesize_one(persona: str) -> Sample | None:
-            prompt = render_template(template, persona=persona)
+        # Build (persona, language) pairs round-robin
+        pairs: list[tuple[str, str]] = []
+        for i in range(n):
+            persona = personas[i % len(personas)]
+            language = self.languages[i % len(self.languages)]
+            pairs.append((persona, language))
+
+        async def synthesize_one(persona: str, language: str) -> Sample | None:
+            prompt = render_template(template, persona=persona, language=language)
             try:
                 result = await self.llm.complete(
                     messages=[{"role": "user", "content": prompt}],
@@ -372,13 +381,13 @@ class PersonaGenerator(BaseGenerator):
                 instruction = result["content"].strip()
                 if not instruction:
                     return None
-                return Sample(instruction=instruction, persona=persona)
+                return Sample(instruction=instruction, persona=persona, language=language)
             except Exception as e:
                 logger.warning("Instruction synthesis failed: %s", e)
                 return None
 
-        # Build task list: round-robin over personas
-        assignments = [personas[i % len(personas)] for i in range(n)]
+        # Build task list
+        assignments = pairs
 
         # Sliding window
         window = min(self.max_concurrent, len(assignments))
@@ -387,7 +396,7 @@ class PersonaGenerator(BaseGenerator):
         total = 0
 
         while idx < window:
-            pending.add(asyncio.create_task(synthesize_one(assignments[idx])))
+            pending.add(asyncio.create_task(synthesize_one(*assignments[idx])))
             idx += 1
 
         while pending:
@@ -396,7 +405,7 @@ class PersonaGenerator(BaseGenerator):
             # Refill
             for _ in done:
                 if idx < len(assignments) and total < n:
-                    pending.add(asyncio.create_task(synthesize_one(assignments[idx])))
+                    pending.add(asyncio.create_task(synthesize_one(*assignments[idx])))
                     idx += 1
 
             batch: list[Sample] = []
