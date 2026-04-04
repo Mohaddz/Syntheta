@@ -33,14 +33,14 @@
 Audit every generator, transformer, and filter against the source papers. The current implementations were built to match the paper abstracts and high-level descriptions. A line-by-line comparison with the actual methodology sections is needed to ensure correctness and completeness.
 
 - [x] **TopicTreeGenerator** — compare against TreeSynth (2025) and Seed-Free SDG (2024). Verify: tree construction prompt design, diversity of topic sampling strategy, plan distribution balancing, instruction generation prompt faithfulness.
-- [ ] **PersonaGenerator** — compare against "Scaling Synthetic Data with 1B Personas" (2024) and MATRIX-Gen (ACL 2025). Verify: persona attribute diversity (demographics, expertise, perspective), question generation grounding in persona context, deduplication across personas.
-- [ ] **SeedDatasetGenerator** — compare against Self-Instruct (Wang et al., 2023). Verify: few-shot pool construction, similarity filtering against seed pool (currently missing?), iterative pool expansion, classification vs generation task split.
-- [ ] **EvolInstruct** — compare against WizardLM (Xu et al., 2023) and WizardLM2. Verify: all 6 strategy prompts match paper descriptions, elimination criteria (too short, copy-paste, "sorry" responses), multi-round evolution chain integrity.
-- [ ] **ResponseGenerator** — verify CoT prompting follows best practices. Check: does it strip thinking tokens from final response? Does it handle refusals?
-- [ ] **PretrainRewriter** — compare against FinePhrase (2024). Verify: all 4 strategy prompts match paper methodology, output format correctness, quality of rewrites at scale.
-- [ ] **QualityFilter** — compare against LLM-as-judge literature (MT-Bench, AlpacaEval). Verify: scoring dimensions, prompt design, score extraction robustness, threshold calibration.
+- [x] **PersonaGenerator** — compare against "Scaling Synthetic Data with 1B Personas" (2024) and MATRIX-Gen (ACL 2025). Verify: persona attribute diversity (demographics, expertise, perspective), question generation grounding in persona context, deduplication across personas.
+- [ ] **SeedDatasetGenerator** — compare against Self-Instruct (Wang et al., 2023). Verify: few-shot pool construction, similarity filtering against seed pool (currently missing?), iterative pool expansion, classification vs generation task split. Note: Self-Instruct is foundational but superseded by most labs; keep as a simple bootstrap option.
+- [ ] **EvolInstruct** — compare against WizardLM (Xu et al., 2023). Verify: all 6 strategy prompts match paper descriptions, elimination criteria (too short, copy-paste, "sorry" responses), multi-round evolution chain integrity. Also review Auto Evol-Instruct (EMNLP 2024) for potential "auto" strategy mode.
+- [ ] **ResponseGenerator** — verify CoT prompting follows best practices. Check: does it strip thinking tokens from final response? Does it handle refusals? Also consider best-of-N rejection sampling as enhancement.
+- [ ] **PretrainRewriter** — compare against FinePhrase playbook (HuggingFace, March 2026). Our 4 strategies (FAQ, Math, Table, Tutorial) match their top-performing prompts. Verify: prompt templates match their published prompts exactly, output format correctness. Reference: https://huggingface.co/spaces/HuggingFaceFW/finephrase and DataTrove production script.
+- [ ] **QualityFilter** — compare against LLM-as-judge literature (MT-Bench, AlpacaEval) and Nemotron-4 Reward Model approach. Verify: scoring dimensions, prompt design, score extraction robustness, threshold calibration.
 - [ ] **SafetyFilter** — verify blocklist coverage, LLM safety check prompt design, cultural preset completeness. Test with adversarial inputs.
-- [ ] **TemplateCollapseDetector** — verify prefix detection logic handles edge cases (short samples, multilingual text, code blocks).
+- [ ] **TemplateCollapseDetector** — verify prefix detection logic handles edge cases (short samples, multilingual text, code blocks). Consider embedding-based semantic dedup (SemDeDup) as future enhancement.
 
 ### Remaining MVP Items — P1
 
